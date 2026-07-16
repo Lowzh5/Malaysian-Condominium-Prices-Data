@@ -27,3 +27,5 @@ print("-------------------------------")
 print(df.shape)
 
 print(df.duplicated().sum())
+
+#dasd
