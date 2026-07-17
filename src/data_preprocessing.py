@@ -149,11 +149,14 @@ for gid in dup_groups:
 
 print(f"\nAdditional non-null cells recoverable by merging: {merge_gain}")
 
-# Merge rather than blindly keeping the first record: groupby().first() takes
-# the first non-null value per column, so complementary fields present only in
-# a later record are preserved instead of discarded.
-df = df.sort_values('Ad List', kind='stable')
+# Merge rather than blindly keeping the first record: within each Ad List group,
+# rank rows by completeness (fewest missing values first) so that if a genuine
+# conflict exists, the value from the more complete record wins; groupby().first()
+# still fills in any complementary fields the top-ranked row is missing.
+df['_completeness'] = df.notna().sum(axis=1)
+df = df.sort_values(['Ad List', '_completeness'], ascending=[True, False], kind='stable')
 df = df.groupby('Ad List', as_index=False, sort=False).first()
+df = df.drop(columns='_completeness')
 shape_after_adlist = df.shape[0]
 
 print(f"Rows after Ad List merge:            {shape_after_adlist}")
@@ -184,5 +187,5 @@ print("re-listing of the same property over time. Retained (not removed) as")
 print("there is no evidence this is a data collection error.")
 
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_step32.csv"), index=False)
-joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_step32.pkl"))
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")

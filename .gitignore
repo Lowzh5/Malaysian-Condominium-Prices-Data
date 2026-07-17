@@ -18,3 +18,7 @@ Thumbs.db
 # Editor/IDE settings
 .vscode/
 .idea/
+
+# Generated/derived data (reproducible from data/raw + src pipeline scripts)
+data/processed/*.pkl
+data/processed/*.csv
