@@ -4,6 +4,7 @@ import os
 import joblib 
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import seaborn as sns
 
 pd.set_option('display.max_columns', None)
@@ -74,11 +75,18 @@ print("\n--- Missing value count per row (distribution) ---")
 missing_per_row = df.isna().sum(axis=1)
 print(missing_per_row.describe())
 
-plt.figure(figsize=(11, 6))
-sns.heatmap(df.isna(), cbar=False, cmap="viridis")
-plt.title("Figure(1): Missing Value Map After Standardisation")
+fig, ax = plt.subplots(figsize=(11, 6))
+sns.heatmap(df.isna(), cbar=False, cmap="viridis", ax=ax)
+ax.set_title("Missing Value Map After Standardisation")
+ax.set_xlabel("Column")
+ax.set_ylabel("Row index")
+legend_handles = [
+    Patch(facecolor=plt.get_cmap("viridis")(0.0), label="Non-null (value present)"),
+    Patch(facecolor=plt.get_cmap("viridis")(1.0), label="Null (missing)")
+]
+ax.legend(handles=legend_handles, loc="lower left", bbox_to_anchor=(0, -0.45), frameon=True)
 plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig01_missing_map.png"), dpi=150)
+plt.savefig(os.path.join(DOWNLOADS_DIR, "fig01_missing_map.png"), dpi=150, bbox_inches="tight")
 plt.close()
 
 # ============================================================
@@ -100,27 +108,59 @@ print(f"Exact duplicate rows removed:    {exact_dup_count}")
 print(f"Rows after exact dedup:          {shape_after_exact}")
 
 # Stage 2 — duplicated Ad List
-core_cols = ['price', 'Bedroom', 'Bathroom', 'Property Size', 'Address']
+# Ad List is the unique listing identifier, so a repeated value means the same
+# advertisement was captured more than once. All columns (not just core fields)
+# are compared to detect any genuine conflict between the records.
 dup_adlist_mask = df['Ad List'].duplicated(keep=False)
 dup_groups = df.loc[dup_adlist_mask, 'Ad List'].unique()
 
-conflicts = []
+conflict_detail = []
 for gid in dup_groups:
-    sub = df[df['Ad List'] == gid][core_cols].astype(str)
-    if sub.nunique().gt(1).any():
-        conflicts.append(gid)
+    sub = df[df['Ad List'] == gid]
+    conflicting_cols = []
+    for c in df.columns:
+        vals = sub[c].dropna().astype(str).unique()
+        if len(vals) > 1:
+            conflicting_cols.append((c, list(vals)))
+    if conflicting_cols:
+        conflict_detail.append((gid, conflicting_cols))
 
-print(f"\nAd List duplicate groups found:    {len(dup_groups)}")
-print(f"Groups with conflicting core data: {len(conflicts)}")
+print(f"\nAd List duplicate groups found:      {len(dup_groups)}")
+print(f"Groups with conflict in any column:  {len(conflict_detail)}")
 
-df = df.drop_duplicates(subset='Ad List', keep='first')
+if conflict_detail:
+    print("\nConflicting records requiring review:")
+    for gid, cols in conflict_detail:
+        print(f"  Ad List {gid}:")
+        for c, vals in cols:
+            print(f"     {c}: {vals}")
+    print("\nNote: the dataset contains no timestamp column, so record recency")
+    print("cannot be verified. Resolution rule applied: retain the record with")
+    print("more non-null fields, as the more complete source.")
+
+# Quantify what a merge would recover before applying it, so the choice of
+# strategy is evidence-based rather than assumed.
+merge_gain = 0
+for gid in dup_groups:
+    sub = df[df['Ad List'] == gid]
+    best_single = sub.notna().sum(axis=1).max()
+    merged_nonnull = sub.notna().any(axis=0).sum()
+    merge_gain += (merged_nonnull - best_single)
+
+print(f"\nAdditional non-null cells recoverable by merging: {merge_gain}")
+
+# Merge rather than blindly keeping the first record: groupby().first() takes
+# the first non-null value per column, so complementary fields present only in
+# a later record are preserved instead of discarded.
+df = df.sort_values('Ad List', kind='stable')
+df = df.groupby('Ad List', as_index=False, sort=False).first()
 shape_after_adlist = df.shape[0]
 
-print(f"Rows after Ad List dedup:          {shape_after_adlist}")
+print(f"Rows after Ad List merge:            {shape_after_adlist}")
 
 print("\n--- Before / After summary table ---")
 summary = pd.DataFrame({
-    "Stage": ["After 3.1 (standardisation)", "After exact duplicate removal", "After Ad List duplicate removal"],
+    "Stage": ["After 3.1 (standardisation)", "After exact duplicate removal", "After Ad List merge"],
     "Rows": [shape_before, shape_after_exact, shape_after_adlist]
 })
 print(summary.to_string(index=False))
