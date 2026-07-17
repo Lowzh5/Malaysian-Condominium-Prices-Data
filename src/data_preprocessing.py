@@ -56,7 +56,7 @@ for col in obj_cols:
 print(f"Candidate sentinels checked:      {CANDIDATE_SENTINELS}")
 print(f"Sentinels actually found in data: {found_sentinels}")
 
-before_na = df.isna().sum().sum()
+before_na = df.isna().sum().sum() # first .sum() is total for each column, second .sum() is for total for entire
 df = df.replace(list(found_sentinels), np.nan)
 after_na = df.isna().sum().sum()
 
