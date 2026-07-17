@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import os
+import joblib 
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -12,6 +13,8 @@ csv_path = os.path.join(BASE_DIR, "data", "raw", "houses.csv")
 df = pd.read_csv(csv_path)
 
 DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
+PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
+os.makedirs(PROCESSED_DIR, exist_ok=True)
 
 # ============================================================
 # Step 0 — Review (observe only, no changes made)
@@ -78,9 +81,6 @@ plt.tight_layout()
 plt.savefig(os.path.join(DOWNLOADS_DIR, "fig01_missing_map.png"), dpi=150)
 plt.close()
 
-df.to_csv(os.path.join(DOWNLOADS_DIR, "houses_step31.csv"), index=False)
-print(f"\nSaved to Downloads: {df.shape}")
-
 # ============================================================
 # 3.2 Duplicate Removal
 # ============================================================
@@ -143,5 +143,6 @@ print("listing events, not duplicate scrapes of the same ad. Likely represents")
 print("re-listing of the same property over time. Retained (not removed) as")
 print("there is no evidence this is a data collection error.")
 
-df.to_csv(os.path.join(DOWNLOADS_DIR, "houses_step32.csv"), index=False)
-print(f"\nSaved to Downloads: {df.shape}")
+df.to_csv(os.path.join(PROCESSED_DIR, "houses_step32.csv"), index=False)
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_step32.pkl"))
+print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
