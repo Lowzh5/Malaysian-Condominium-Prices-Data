@@ -144,4 +144,5 @@ print("re-listing of the same property over time. Retained (not removed) as")
 print("there is no evidence this is a data collection error.")
 
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_step32.csv"), index=False)
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_step32.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
