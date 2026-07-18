@@ -93,7 +93,7 @@ plt.close()
 # 3.2 Duplicate Removal
 # ============================================================
 print("\n" + "="*60)
-print("STEP 3.2: DUPLICATE REMOVAL")
+print("STEP 3.2: DUPLICATE HANDLING")
 print("="*60)
 
 shape_before = df.shape[0]
@@ -103,16 +103,13 @@ exact_dup_count = df.duplicated().sum()
 df = df.drop_duplicates()
 shape_after_exact = df.shape[0]
 
-print(f"Rows before 3.2:                 {shape_before}")
-print(f"Exact duplicate rows removed:    {exact_dup_count}")
-print(f"Rows after exact dedup:          {shape_after_exact}")
-
 # Stage 2 — duplicated Ad List
 # Ad List is the unique listing identifier, so a repeated value means the same
 # advertisement was captured more than once. All columns (not just core fields)
 # are compared to detect any genuine conflict between the records.
 dup_adlist_mask = df['Ad List'].duplicated(keep=False)
 dup_groups = df.loc[dup_adlist_mask, 'Ad List'].unique()
+rows_in_dup_groups = dup_adlist_mask.sum()
 
 conflict_detail = []
 for gid in dup_groups:
@@ -125,9 +122,6 @@ for gid in dup_groups:
     if conflicting_cols:
         conflict_detail.append((gid, conflicting_cols))
 
-print(f"\nAd List duplicate groups found:      {len(dup_groups)}")
-print(f"Groups with conflict in any column:  {len(conflict_detail)}")
-
 if conflict_detail:
     print("\nConflicting records requiring review:")
     for gid, cols in conflict_detail:
@@ -138,38 +132,41 @@ if conflict_detail:
     print("cannot be verified. Resolution rule applied: retain the record with")
     print("more non-null fields, as the more complete source.")
 
-# Quantify what a merge would recover before applying it, so the choice of
-# strategy is evidence-based rather than assumed.
-merge_gain = 0
-for gid in dup_groups:
-    sub = df[df['Ad List'] == gid]
-    best_single = sub.notna().sum(axis=1).max()
-    merged_nonnull = sub.notna().any(axis=0).sum()
-    merge_gain += (merged_nonnull - best_single)
-
-print(f"\nAdditional non-null cells recoverable by merging: {merge_gain}")
+# Snapshot the pre-merge rows so the before/after comparison below is generated
+# from this run's actual data, not a hand-picked illustration.
+before_merge_snapshot = df.loc[dup_adlist_mask].copy()
+before_merge_snapshot.insert(0, 'stage', 'before')
 
 # Merge rather than blindly keeping the first record: within each Ad List group,
 # rank rows by completeness (fewest missing values first) so that if a genuine
 # conflict exists, the value from the more complete record wins; groupby().first()
 # still fills in any complementary fields the top-ranked row is missing.
-df['_completeness'] = df.notna().sum(axis=1)
+df['_completeness'] = df.notna().sum(axis=1) # the more notna(), the more completeness records in this row
 df = df.sort_values(['Ad List', '_completeness'], ascending=[True, False], kind='stable')
-df = df.groupby('Ad List', as_index=False, sort=False).first()
+df = df.groupby('Ad List', as_index=False, sort=False).first() 
 df = df.drop(columns='_completeness')
 shape_after_adlist = df.shape[0]
+rows_removed_by_merge = rows_in_dup_groups - len(dup_groups)
 
-print(f"Rows after Ad List merge:            {shape_after_adlist}")
+print(f"\nOriginal number of rows:                          {shape_before}")
+print(f"Exact duplicate rows removed:                      {exact_dup_count}")
+print(f"Rows after exact duplicate removal:                {shape_after_exact}")
+print(f"\nRemaining non-identical duplicated Ad List groups: {len(dup_groups)}")
+print(f"Rows involved in these groups:                     {rows_in_dup_groups}")
+print(f"Groups with conflicting non-missing values:        {len(conflict_detail)}")
+print(f"Rows removed after merging duplicate listings:  {rows_removed_by_merge}")
+print(f"\nFinal number of rows:                              {shape_after_adlist}")
+print(f"Remaining exact duplicate rows:                     {df.duplicated().sum()}")
+print(f"Remaining duplicated Ad List groups:                {df['Ad List'].duplicated().sum()}")
 
-print("\n--- Before / After summary table ---")
-summary = pd.DataFrame({
-    "Stage": ["After 3.1 (standardisation)", "After exact duplicate removal", "After Ad List merge"],
-    "Rows": [shape_before, shape_after_exact, shape_after_adlist]
-})
-print(summary.to_string(index=False))
-
-print(f"\nFinal duplicate check: {df.duplicated().sum()} exact dups, "
-      f"{df['Ad List'].duplicated().sum()} Ad List dups remaining")
+# Before/after evidence for the report: the merged rows for the same groups,
+# taken from this run's actual df — not a manually constructed example.
+after_merge_snapshot = df[df['Ad List'].isin(dup_groups)].copy()
+after_merge_snapshot.insert(0, 'stage', 'after_merge')
+comparison_df = pd.concat([before_merge_snapshot, after_merge_snapshot], ignore_index=True)
+comparison_df = comparison_df.sort_values(['Ad List', 'stage'])
+comparison_df.to_csv(os.path.join(PROCESSED_DIR, "adlist_merge_before_after.csv"), index=False)
+print(f"\nBefore/after merge comparison saved to {PROCESSED_DIR}\\adlist_merge_before_after.csv")
 
 # Stage 3 — supplementary check: near-duplicate re-listings
 # (duplicated Ad List already handled above; this checks records with
@@ -186,6 +183,72 @@ print("listing events, not duplicate scrapes of the same ad. Likely represents")
 print("re-listing of the same property over time. Retained (not removed) as")
 print("there is no evidence this is a data collection error.")
 
+# ============================================================
+# 3.3 Data Type Conversion
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.3: DATA TYPE CONVERSION")
+print("="*60)
+
+conversion_log = []
+
+def convert_and_report(col_name, converter, rule):
+    before_non_null = df[col_name].notna().sum()
+    converted = converter(df[col_name])
+    after_non_null = converted.notna().sum()
+    conversion_log.append({
+        "Column": col_name,
+        "Rule": rule,
+        "Non-null before": before_non_null,
+        "Non-null after": after_non_null,
+        "Conversion failures": before_non_null - after_non_null,
+    })
+    return converted
+
+# price: "RM 340 000" -> 340000
+df['price'] = convert_and_report(
+    'price',
+    lambda s: pd.to_numeric(s.str.replace('RM', '', regex=False).str.replace(' ', '', regex=False), errors='coerce'),
+    "Remove 'RM' prefix and internal spaces, then convert to numeric"
+)
+
+# Property Size: "418 sq.ft." -> 418
+# Extract the leading number rather than stripping non-numeric characters, since
+# "sq.ft." itself contains periods and would corrupt the value (e.g. "1000..").
+df['Property Size'] = convert_and_report(
+    'Property Size',
+    lambda s: pd.to_numeric(
+        s.str.extract(r'([\d,]+(?:\.\d+)?)\s*sq\.ft\.')[0].str.replace(',', '', regex=False),
+        errors='coerce'
+    ),
+    "Extract numeric value preceding 'sq.ft.', strip thousands separators, convert to numeric"
+)
+
+# Bedroom, Bathroom, Completion Year, # of Floors, Total Units, Parking Lot are
+# already plain numeric strings (aside from missing values standardised in 3.1),
+# so they only need type coercion.
+simple_numeric_cols = ['Bedroom', 'Bathroom', 'Completion Year', '# of Floors', 'Total Units', 'Parking Lot']
+for col in simple_numeric_cols:
+    df[col] = convert_and_report(
+        col,
+        lambda s: pd.to_numeric(s, errors='coerce'),
+        "Direct conversion to numeric (already plain integer strings)"
+    )
+
+conversion_df = pd.DataFrame(conversion_log)
+print("\n--- Conversion summary ---")
+print(conversion_df.to_string(index=False))
+
+print("\nNote: pd.to_numeric selects the dtype automatically - columns with no")
+print("missing values (price, Property Size) become int64 directly, while columns")
+print("still carrying NaN (pending Step 3.5 imputation) become float64, since NaN")
+print("cannot be stored in int64. No manual dtype casting is applied at this stage.")
+
+print("\n--- Dtypes after 3.3 ---")
+print(df[['price', 'Property Size'] + simple_numeric_cols].dtypes)
+
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
 joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
+
+print(df.info())
