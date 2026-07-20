@@ -316,17 +316,10 @@ large_deferred = df.loc[(df['Property Size'] > 8000) & (~size_flag_mask), ['Ad L
 # digit-shift correction introduced, then cast back to int64 (still 0-missing).
 df['Property Size'] = df['Property Size'].round().astype(int)
 
-"""
---- Bedroom / Bathroom: singleton values individually verified ---
-A general regex cross-check against the description (the same approach used
-for Property Size above) was tested but rejected for Bedroom/Bathroom: ranges
-("3 to 4 Bedrooms") and "N+1" notation produce 878 mismatches dataset-wide, most
-of them false positives (see notes/bedroom_bathroom_regex_false_positives.csv),
-so no blanket automated rule is applied here. Instead, values that occur only
-once in the whole column (df['Bedroom'].value_counts() / df['Bathroom']
-.value_counts() == 1) were individually verified against their description:
-Bedroom has two such values (8, 10), Bathroom has one (8).
-"""
+# Blanket regex cross-check against description was tested but rejected: 878
+# mismatches dataset-wide, mostly false positives (see notes/bedroom_bathroom_
+# regex_false_positives.csv). Instead, only singleton values (value_counts()==1)
+# were individually verified against description.
 room_corrections = [
     {"Ad List": 102236931, "Column": "Bedroom", "Original": 10, "Description evidence": 3,
      "Note": "Description states '3-Bedrooms' (and '3-Bathroom', matching the existing Bathroom value)."},
@@ -449,14 +442,17 @@ print("\n" + "="*60)
 print("STEP 3.6: OUTLIER TREATMENT")
 print("="*60)
 
-# --- Price: raw vs log boxplot. Log transform doesn't remove the extreme
-# values (still shown as outlier points on both sides) - it compresses the
-# right-skewed scale so the bulk of listings aren't dominated by the high tail.
+# Price: raw vs log boxplot - log compresses the right-skewed scale so the
+# bulk of listings aren't dominated by the high tail (outliers stay visible).
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-sns.boxplot(x=df['price'], ax=axes[0])
+
+# original price
+sns.boxplot(x=df['price'], ax=axes[0]) #right graph, draw box, whisker, outliers
 axes[0].set_title("Raw Listing Price")
 axes[0].set_xlabel("Listing Price (RM)")
-axes[0].xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
+axes[0].xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}')) # convert 1ef to 1,000,000
+
+#log price
 sns.boxplot(x=np.log(df['price']), ax=axes[1])
 axes[1].set_title("Log-transformed Price")
 axes[1].set_xlabel("ln(Listing Price)")
@@ -465,35 +461,28 @@ plt.savefig(os.path.join(DOWNLOADS_DIR, "fig02_price_boxplot.png"), dpi=150, bbo
 plt.close()
 
 price_q1, price_q3 = df['price'].quantile([0.25, 0.75])
-price_upper = price_q3 + 1.5 * (price_q3 - price_q1)
+# 没有算lower bound是因为得出来的是negative
+price_upper = price_q3 + 1.5 * (price_q3 - price_q1) # print colsole output mention有多少 > upper bound
 print(f"Price IQR upper bound: RM{price_upper:,.0f}; values above: {(df['price'] > price_upper).sum()}")
 print(f"Price skewness: raw = {df['price'].skew():.2f}, log = {np.log(df['price']).skew():.2f}")
 
-# Bedroom / Bathroom IQR is degenerate for these two (Q1 == Q3, IQR == 0), so
-# any non-modal value would get flagged - not usable as an automatic rule.
-# The two extreme values this would have flagged (Bedroom 10, Bathroom 8) were
-# already corrected in Section 3.4 using description evidence.
+# Bedroom/Bathroom IQR is degenerate (Q1==Q3) - not usable as a rule; their
+# extreme values were already corrected in 3.4 using description evidence.
 print(f"\nBedroom IQR: Q1={df['Bedroom'].quantile(.25)}, Q3={df['Bedroom'].quantile(.75)} (degenerate, not used as a rule)")
 print(f"Bathroom IQR: Q1={df['Bathroom'].quantile(.25)}, Q3={df['Bathroom'].quantile(.75)} (degenerate, not used as a rule)")
 
-size_q1, size_q3 = df['Property Size'].quantile([0.25, 0.75])
-size_upper = size_q3 + 1.5 * (size_q3 - size_q1)
-print(f"\nProperty Size IQR upper bound: {size_upper:.0f} sq.ft.; values above: {(df['Property Size'] > size_upper).sum()}")
-
-# --- Property Size vs Price: distinguishing invalid outlier from valid luxury
-# property. The 3 large Property Size values left unmodified in 3.4 (no
-# description evidence either way) are highlighted, annotated with Ad List /
-# size / price-per-sqft, to see where they sit relative to the overall trend.
-LARGE_SIZE_REVIEW_ADLIST = [96973074, 103729938, 103792765]
+# Property Size vs Price: candidates are `large_deferred` from 3.4 (>8000 sq.ft,
+# not caught by digit-shift) - reused, not re-picked, so results stay reproducible.
+LARGE_SIZE_REVIEW_ADLIST = large_deferred['Ad List'].tolist()
 review_check = df.loc[df['Ad List'].isin(LARGE_SIZE_REVIEW_ADLIST),
-                       ['Ad List', 'Bedroom', 'Bathroom', 'Property Size', 'price']].copy()
+                       ['Ad List', 'Property Size', 'price']].copy()
 review_check['Ad List'] = review_check['Ad List'].astype(int)
 review_check['price_per_sqft'] = (review_check['price'] / review_check['Property Size']).round(1)
 
-fig, ax = plt.subplots(figsize=(9, 6))
-sns.scatterplot(data=df, x='Property Size', y='price', hue='Property Type', alpha=0.5, ax=ax)
+fig, ax = plt.subplots(figsize=(9, 6)) # Create a 9x6 inch blank canvas and a drawing area (ax)
+sns.scatterplot(data=df, x='Property Size', y='price', hue='Property Type', alpha=0.5, ax=ax) # first layer
 ax.scatter(review_check['Property Size'], review_check['price'], color='red', s=150,
-           marker='X', label='Large size under review', zorder=5)
+           marker='X', label='Large size under review', zorder=5) # second layer
 for _, r in review_check.iterrows():
     ax.annotate(
         f"Ad List {int(r['Ad List'])}\n{r['Property Size']:,.0f} sq.ft.\nRM{r['price_per_sqft']:,.1f}/sqft",
@@ -508,15 +497,12 @@ plt.tight_layout()
 plt.savefig(os.path.join(DOWNLOADS_DIR, "fig03_size_vs_price.png"), dpi=150, bbox_inches="tight")
 plt.close()
 
-# --- Price per sq.ft.: a size-price consistency check. An unusually low value
-# means the recorded size is large relative to what the price would suggest.
-# The 3 records under review are marked with vertical lines so their position
-# in the distribution is visible (a plain histogram alone wouldn't show them).
+# Price per sq.ft.: a size-price consistency check - unusually low means size
+# is large relative to price. The 3 review records are marked with vlines.
 price_per_sqft = df['price'] / df['Property Size']
 fig, ax = plt.subplots(figsize=(8, 5))
 sns.histplot(price_per_sqft, bins=50, ax=ax)
-# Stagger annotation heights (rather than all at the same y) since two of the
-# three values are close together (15.3 / 26.7) and would otherwise overlap.
+# Stagger annotation heights - two values (15.3/26.7) are close and would overlap.
 annotation_heights = [0.95, 0.75, 0.55]
 for (_, r), height in zip(review_check.sort_values('price_per_sqft').iterrows(), annotation_heights):
     ax.axvline(r['price_per_sqft'], color='red', linestyle='--', linewidth=1)
@@ -533,47 +519,61 @@ plt.close()
 print("\n--- Price per sq.ft. for the 3 large Property Size records under review ---")
 print(review_check.to_string(index=False))
 
-# No decision made here yet - 9,800 / 9,376 / 17,611 sq.ft. are presented as
-# diagnostic evidence only (scatterplot position + price/sqft above). Whether
-# to retain, set to missing, or otherwise treat each one is decided after
-# reviewing this output, not automatically in this script.
-
-# --- Parking Lot: IQR is not degenerate here (Q1=1, Q3=2, IQR=1), so it does
-# produce a meaningful bound - but the 33 records above it are only
-# candidates, not automatic corrections. The 3 most severe (9-10 lots paired
-# with a low price and a low-cost-housing description) are shown below as
-# diagnostic evidence only; no value is changed at this stage.
+# Parking Lot: IQR flags 33 candidates, but most pair with higher-priced
+# properties (not suspicious). A genuine candidate needs all three: high
+# (>IQR upper), rare (<=2 occurrences), AND price far below the median.
 parking_q1, parking_q3 = df['Parking Lot'].quantile([0.25, 0.75])
 parking_upper = parking_q3 + 1.5 * (parking_q3 - parking_q1)
 print(f"\nParking Lot IQR upper bound: {parking_upper}; candidate values above: {(df['Parking Lot'] > parking_upper).sum()}")
 
-PARKING_REVIEW_ADLIST = [103727934, 103738015, 103794493]
-print(df.loc[df['Ad List'].isin(PARKING_REVIEW_ADLIST), ['Ad List', 'Parking Lot', 'price']].to_string(index=False))
+parking_value_counts = df['Parking Lot'].value_counts()
+rare_parking_values = parking_value_counts[parking_value_counts <= 2].index
+overall_median_price = df['price'].median()
+parking_candidate_mask = (
+    (df['Parking Lot'] > parking_upper)
+    & df['Parking Lot'].isin(rare_parking_values)
+    & (df['price'] < overall_median_price * 0.5)
+)
+PARKING_REVIEW_ADLIST = df.loc[parking_candidate_mask, 'Ad List'].tolist()
+# Property Size/Bedroom/Bathroom aren't part of the filter - shown here as
+# supporting context (all 3 are compact units, well below the 902 sq.ft. median).
+print(df.loc[parking_candidate_mask, ['Ad List', 'Parking Lot', 'price', 'Property Size', 'Bedroom', 'Bathroom']].to_string(index=False))
 
-# --- Bedroom / Bathroom / Parking Lot: count plots instead of boxplot, since
-# IQR is unreliable for these low-range discrete counts - Bedroom/Bathroom's
-# IQR is degenerate, and Parking Lot's 33 IQR-flagged records include plenty
-# of ordinary larger units.
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-sns.countplot(x=df['Bedroom'], ax=axes[0])
-axes[0].set_title("Bedroom")
-sns.countplot(x=df['Bathroom'], ax=axes[1])
-axes[1].set_title("Bathroom")
-sns.countplot(x=df['Parking Lot'], ax=axes[2])
-axes[2].set_title("Parking Lot")
-# Parking Lot's 9/10-lot bars are too small to read against the 1/2-lot bars
-# on the same scale, so label every bar with its exact count.
-labels = [f"{int(v)} record" if v == 1 else f"{int(v)} records" for v in axes[2].containers[0].datavalues]
-axes[2].bar_label(axes[2].containers[0], labels=labels, fontsize=7, rotation=90, padding=3)
-axes[2].margins(y=0.25)
+# Parking Lot vs Price: a count plot alone can't show if a high count is
+# plausible - only price cross-check does. The 3 severe candidates are highlighted.
+fig, ax = plt.subplots(figsize=(9, 6))
+sns.scatterplot(data=df, x='Parking Lot', y='price', alpha=0.4, ax=ax)
+parking_review = df.loc[df['Ad List'].isin(PARKING_REVIEW_ADLIST), ['Ad List', 'Parking Lot', 'price', 'Property Size']].copy()
+parking_review['Ad List'] = parking_review['Ad List'].astype(int)
+ax.scatter(parking_review['Parking Lot'], parking_review['price'], color='red', s=150,
+           marker='X', label='High lot count under review', zorder=5)
+# The two 10-lot records (78k/88k) are close together - offset labels to avoid overlap.
+annotation_offsets = [(10, 10), (10, 65), (-100, 10)]
+for (_, r), offset in zip(parking_review.sort_values('price').iterrows(), annotation_offsets):
+    ax.annotate(f"Ad List {int(r['Ad List'])}\n{r['Parking Lot']:.0f} lots\nRM{r['price']:,.0f}\n{r['Property Size']:,.0f} sq.ft.",
+                xy=(r['Parking Lot'], r['price']), xytext=offset, textcoords='offset points',
+                fontsize=8, color='red')
+ax.set_title("Parking Lot vs Price")
+ax.set_ylabel("Listing Price (RM)")
+ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
+ax.legend()
 plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig05_discrete_counts.png"), dpi=150, bbox_inches="tight")
+plt.savefig(os.path.join(DOWNLOADS_DIR, "fig05_parking_vs_price.png"), dpi=150, bbox_inches="tight")
 plt.close()
 
-print(f"\nBedroom range after 3.6:  {df['Bedroom'].min()} - {df['Bedroom'].max()}")
-print(f"Bathroom range after 3.6: {df['Bathroom'].min()} - {df['Bathroom'].max()}")
-print("No Property Size or Parking Lot values modified in 3.6 yet - pending review of the")
-print("diagnostics above (scatterplot, price/sqft, IQR candidates).")
+# --- Final treatment (Table 3.6) ---
+# Property Size: 103729938 (17,611 sq.ft.) has no source support and is
+# inconsistent with price/attributes -> converted to NaN. 96973074 (9,376) and
+# 103792765 (9,800) are retained - both have source-confirmed sizes in their
+# description, even though 96973074's price/sqft looks unusual.
+df.loc[df['Ad List'] == 103729938, 'Property Size'] = np.nan
+print("\nProperty Size converted to NaN: Ad List 103729938 (no source support, inconsistent)")
+print("Property Size retained: Ad List 96973074, 103792765 (source-confirmed size)")
+
+# Parking Lot: all 3 candidates lack independent evidence and are inconsistent
+# with price/property attributes -> converted to NaN.
+df.loc[df['Ad List'].isin(PARKING_REVIEW_ADLIST), 'Parking Lot'] = np.nan
+print(f"Parking Lot converted to NaN: Ad List {PARKING_REVIEW_ADLIST}")
 
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
 joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
