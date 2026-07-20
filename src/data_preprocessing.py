@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
 import seaborn as sns
+from sklearn.preprocessing import MultiLabelBinarizer
 
 pd.set_option('display.max_columns', None)
 
@@ -580,3 +581,445 @@ joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 
 print(df.info())
+
+# ============================================================
+# 3.8 Feature Engineering (executed before 3.7 Feature Selection,
+# since several dropped columns are the source of engineered features below)
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.8: FEATURE ENGINEERING")
+print("="*60)
+
+print("\n--- State (extracted from Address) ---")
+
+"""
+Address format is inconsistent across rows - not just varying prefixes, but
+the state isn't always the last comma-separated segment. Some listings write
+"..., State, City" instead of "..., City, State" (e.g. "Puchong, Selangor,
+Puchong"), which would make a last-segment-only extraction miss the state
+entirely (confirmed: all 152 addresses where the naive last-segment approach
+failed turned out to have the state one or more segments earlier, not
+missing). So every segment is checked, scanning from the end backwards, and
+matched against a fixed list of real Malaysian states - exact whole-segment
+equality, not substring search, so a place name that merely contains a state's
+name (e.g. "Kampung Melaka") is never mistaken for the state "Melaka".
+
+Matching is case-insensitive (e.g. "SABAH", "putrajaya") - two rows in this
+dataset have a wrong-case state segment, currently masked only by a correctly-
+cased duplicate elsewhere in the same address; without case-insensitivity a
+future row with no such backup would be wrongly marked NaN.
+"""
+VALID_STATES = {'Selangor', 'Penang', 'Kuala Lumpur', 'Johor', 'Sabah', 'Sarawak',
+                 'Perak', 'Kedah', 'Pahang', 'Negeri Sembilan', 'Melaka',
+                 'Terengganu', 'Kelantan', 'Perlis', 'Putrajaya', 'Labuan'}
+VALID_STATES_LOWER = {s.lower(): s for s in VALID_STATES}
+
+def extract_state_from_address(address):
+    if pd.isna(address):
+        return np.nan
+    segments = [s.strip() for s in address.split(',')]
+    for segment in reversed(segments):
+        if segment.lower() in VALID_STATES_LOWER:
+            return VALID_STATES_LOWER[segment.lower()]
+    return np.nan
+
+df['State'] = df['Address'].apply(extract_state_from_address)
+
+address_missing = df['Address'].isna().sum()
+no_state_in_any_segment = df['State'].isna().sum() - address_missing
+print(f"Address missing (State inherits NaN):                                {address_missing}")
+print(f"Address present but no segment matches a real state (state genuinely")
+print(f"not written anywhere in the address), set to NaN:                    {no_state_in_any_segment}")
+print(f"Total 'State' missing after extraction:                              {df['State'].isna().sum()}")
+
+"""
+Rare states (fewer than 10 listings) are merged into 'Other' - the same
+treatment already applied to Property Type / Land Title's sparse categories.
+Left as their own one-hot category, a state with only 1-2 listings would very
+likely land entirely in train or entirely in test after the 80:20 split,
+giving that column zero learnable signal or mismatched train/test columns.
+"""
+RARE_STATE_THRESHOLD = 10
+state_counts = df['State'].value_counts()
+rare_states = state_counts[state_counts < RARE_STATE_THRESHOLD].index.tolist()
+print(f"\nRare states (<{RARE_STATE_THRESHOLD} listings), merged into 'Other': {rare_states}")
+df['State'] = df['State'].replace(rare_states, 'Other')
+
+print("\n--- 'State' value counts after extraction + rare-category merge ---")
+print(df['State'].value_counts(dropna=False))
+print("\n" + "-"*60)
+
+print("\n--- Property Age (from Completion Year) ---")
+
+"""
+Property Age is computed against a fixed reference year, not whatever year
+the script happens to run in - Completion Year is a fixed fact about the
+property, and this dataset was collected in September 2023 (per the Kaggle
+source), so ages must be measured from then, not from today's calendar year.
+A dynamic "current year" would silently shift every Property Age value (and
+any report numbers built on it) further every year this script is re-run.
+"""
+REFERENCE_YEAR = 2023
+
+def compute_property_age(completion_year):
+    if pd.isna(completion_year):
+        return np.nan
+    age = REFERENCE_YEAR - completion_year
+    return age if age >= 0 else np.nan
+
+df['Property Age'] = df['Completion Year'].apply(compute_property_age)
+
+"""
+A negative age (Completion Year after REFERENCE_YEAR) isn't invalid data - it
+means the unit was still under construction / sold off-plan at the time of
+collection, which is a normal, common scenario in Malaysian property listings
+and shouldn't be discarded. "Age" simply doesn't apply yet to an unbuilt
+property, so Property Age is correctly left NaN for these rows - but that NaN
+would otherwise be indistinguishable from a genuinely missing Completion Year.
+Is_Off_Plan preserves that distinction as its own signal instead of losing it.
+"""
+df['Is_Off_Plan'] = df['Completion Year'].apply(
+    lambda cy: np.nan if pd.isna(cy) else int(cy > REFERENCE_YEAR)
+)
+
+completion_missing = df['Completion Year'].isna().sum()
+off_plan_count = (df['Completion Year'] > REFERENCE_YEAR).sum()
+print(f"Completion Year missing (Property Age inherits NaN, Is_Off_Plan = NaN):   {completion_missing}")
+print(f"Completion Year after {REFERENCE_YEAR} - off-plan, Property Age = NaN,")
+print(f"Is_Off_Plan = 1 instead of being discarded:                               {off_plan_count}")
+print(f"Total 'Property Age' missing:                                             {df['Property Age'].isna().sum()}")
+print(f"\n'Property Age' range: {df['Property Age'].min()} - {df['Property Age'].max()}")
+print(f"'Is_Off_Plan' value counts:\n{df['Is_Off_Plan'].value_counts(dropna=False)}")
+print("\n" + "-"*60)
+
+print("\n--- Listed_Facility_Count (from Facilities) ---")
+
+"""
+Purely numeric items are dropped before counting - Ad List 95706905's
+Facilities value ends in a stray "10" that isn't a real facility name (a
+scraping artefact), which would otherwise silently inflate its count by 1.
+"""
+def count_facilities(facilities_text):
+    if pd.isna(facilities_text):
+        return 0
+    items = [item.strip() for item in facilities_text.split(',')]
+    return len([item for item in items if item and not item.isdigit()])
+
+df['Listed_Facility_Count'] = df['Facilities'].apply(count_facilities)
+
+facilities_missing = df['Facilities'].isna().sum()
+print(f"Facilities missing (Listed_Facility_Count set to 0):    {facilities_missing}")
+print(f"\n'Listed_Facility_Count' range: {df['Listed_Facility_Count'].min()} - {df['Listed_Facility_Count'].max()}")
+print(df['Listed_Facility_Count'].describe())
+print("\n" + "-"*60)
+
+print("\n--- Has_X flags (from 'nearby amenity' text columns) ---")
+
+"""
+Bus Stop / Mall / Park / School / Hospital / Highway / Railway Station each
+list a specific nearby amenity name as free text (e.g. "Mid Valley Megamall"),
+with missing rates between 76% and 96% (see notes_missing_value_decision_audit.md).
+The specific name has too little repeat structure to be usable directly, but
+whether the field was filled in at all is itself a signal. Converting to a
+presence flag also removes the missing-value problem entirely - every row
+gets 0 or 1, there is no NaN left over to defer to a later imputation step.
+Note this flag means "information was recorded", not "amenity confirmed
+absent" - a 0 does not prove there is no mall nearby, only that it wasn't written.
+"""
+NEARBY_COLUMNS = ['Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station']
+
+has_flag_log = []
+for col in NEARBY_COLUMNS:
+    flag_col = 'Has_' + col.replace(' ', '_')
+    df[flag_col] = df[col].notna().astype(int)
+    has_flag_log.append({
+        "Source column": col,
+        "New flag": flag_col,
+        "Missing in source (-> flag=0)": df[col].isna().sum(),
+        "Present in source (-> flag=1)": df[col].notna().sum(),
+    })
+
+has_flag_df = pd.DataFrame(has_flag_log)
+print(has_flag_df.to_string(index=False))
+print("\n" + "-"*60)
+
+"""
+--- Features tried in 3.8 and dropped (kept here as a record, not in df) ---
+
+Facilities_Recorded: a presence flag paired with Listed_Facility_Count,
+mirroring Property Age / Is_Off_Plan. Dropped after verifying
+Listed_Facility_Count == 0 for exactly the same 607 rows where Facilities is
+missing, with zero exceptions - no row has Facilities filled in yet produces
+a count of 0 after cleaning. The two carry identical information in this
+dataset, so keeping both is pure redundancy.
+
+Nearby_Amenity_Count: sum of the 7 Has_X flags into a single 0-7 score.
+Dropped for two reasons - it's a pure linear combination of columns already
+in df (the same redundancy problem as Total_Rooms = Bedroom + Bathroom), and
+it's empirically low-value too: r=-0.019, p=0.242 against price (n=3793),
+not statistically significant.
+
+Units per Floor: Total Units / # of Floors. Dropped because several rows
+produce physically impossible values (e.g. Ad List 100502825, Total
+Units=7810 / # of Floors=5 = 1562 units on one floor). Neither source column
+was flagged as invalid by their own individual range checks in 3.4/3.6 (each
+looks reasonable in isolation), so this cross-column ratio surfaced a data
+quality issue in Total Units / # of Floors that univariate outlier checks
+can't catch. Left out until that upstream issue is resolved with evidence.
+"""
+
+df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
+print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
+
+# ============================================================
+# 3.9 Categorical Encoding
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.9: CATEGORICAL ENCODING")
+print("="*60)
+
+print("\n--- State: one-hot encoding ---")
+
+"""
+State has no inherent order between categories (Selangor isn't "more" or
+"less" than Penang), so one-hot is the right encoding - unlike Floor Range,
+which gets ordinal encoding later because Low/Medium/High has a real order.
+
+NaN must be turned into an explicit "Unknown" category before encoding, not
+left as NaN - pd.get_dummies() would otherwise silently mark all 15 dummy
+columns as 0 for those 85 rows, which looks identical to "known and simply
+not any of these states" rather than "state genuinely not on record". Filling
+with the string "Unknown" first (same treatment as Floor Range in 3.5) makes
+that distinction an explicit, visible column instead of a hidden zero-row.
+
+drop_first=True drops one category's dummy column to avoid the "dummy
+variable trap" (perfect multicollinearity - if a linear model knows all other
+dummies are 0, the dropped one is redundant information). Tree-based models
+don't need this, but it doesn't hurt them either, so it's kept for safety
+since the final model choice isn't fixed yet.
+"""
+df['State'] = df['State'].fillna('Unknown')
+
+state_dummies = pd.get_dummies(df['State'], prefix='State', drop_first=True).astype(int)
+state_dummies.columns = [c.replace(' ', '_') for c in state_dummies.columns]
+df = pd.concat([df, state_dummies], axis=1)
+
+print(f"'State' unique categories (incl. Unknown): {sorted(df['State'].unique())}")
+print(f"\nOne-hot columns created ({len(state_dummies.columns)}): {list(state_dummies.columns)}")
+print(state_dummies.sum().sort_values(ascending=False))
+print("\n" + "-"*60)
+
+print("\n--- Property Type: rare-category merge + one-hot encoding ---")
+
+"""
+No missing values here (unlike State), so no "Unknown" category is needed.
+Duplex / Townhouse Condo / Studio / Others each have fewer than 20 listings
+out of 3793 - one-hot on these individually would produce columns that are
+almost entirely 0, and an 80:20 split could easily leave one of them with
+zero rows on either side (train never sees it, or test can't be scored on
+it). Merged into 'Other' first, same treatment already used for State's rare
+states. Also worth noting for the report: Duplex / Townhouse Condo existing
+under a column named "Property Type" for what the source describes as an
+apartment/condominium dataset suggests the source's own categorisation isn't
+fully clean - a data quality observation, not something fixed here.
+"""
+RARE_PROPERTY_TYPE_THRESHOLD = 20
+property_type_counts = df['Property Type'].value_counts()
+rare_property_types = property_type_counts[property_type_counts < RARE_PROPERTY_TYPE_THRESHOLD].index.tolist()
+print(f"'Property Type' counts before merge:\n{property_type_counts}\n")
+print(f"Rare Property Types (<{RARE_PROPERTY_TYPE_THRESHOLD} listings), merged into 'Other': {rare_property_types}")
+df['Property Type'] = df['Property Type'].replace(rare_property_types, 'Other')
+
+property_type_dummies = pd.get_dummies(df['Property Type'], prefix='PropertyType', drop_first=True).astype(int)
+property_type_dummies.columns = [c.replace(' ', '_') for c in property_type_dummies.columns]
+df = pd.concat([df, property_type_dummies], axis=1)
+
+print(f"\n'Property Type' counts after merge:\n{df['Property Type'].value_counts()}")
+print(f"\nOne-hot columns created ({len(property_type_dummies.columns)}): {list(property_type_dummies.columns)}")
+print("\n" + "-"*60)
+
+print("\n--- Land Title: rare-category merge, then binary encoding ---")
+
+"""
+Land Title has 3 categories: Non Bumi Lot (3179), Bumi Lot (607), Malay
+Reserved (7). Malay Reserved is under 0.2% of records - the same sparse-
+category problem as Property Type's rare types. Merged into Bumi Lot rather
+than one-hot as its own column: both Bumi Lot and Malay Reserved represent
+land with restricted purchase eligibility (Bumiputera-only), in contrast to
+Non Bumi Lot's unrestricted eligibility - a real, not arbitrary, grouping.
+
+That merge leaves only 2 categories, so a full one-hot would just produce a
+second column that's the exact logical negation of the first - a binary flag
+(same treatment as Tenure Type's Freehold/Leasehold) is more direct.
+
+Uses .map() rather than a `== 'Non Bumi Lot'` comparison, for the same reason
+as Freehold Indicator - Land Title has 0 missing today, but `==` against NaN
+silently returns False (misclassified as Bumi Lot) instead of staying NaN, so
+this stays correct even if a future data pull or a reordered pipeline
+introduces missing values here.
+"""
+df['Land Title'] = df['Land Title'].replace('Malay Reserved', 'Bumi Lot')
+print(f"'Land Title' counts after merging Malay Reserved into Bumi Lot:\n{df['Land Title'].value_counts()}")
+
+df['Is_Non_Bumi_Lot'] = df['Land Title'].map({'Non Bumi Lot': 1, 'Bumi Lot': 0})
+print(f"\n'Is_Non_Bumi_Lot' value counts:\n{df['Is_Non_Bumi_Lot'].value_counts()}")
+print("\n" + "-"*60)
+
+print("\n--- Tenure Type: binary encoding ---")
+
+"""
+Only 2 categories (Freehold 2311, Leasehold 1482, 0 missing) - a full one-hot
+would produce a second column that's the exact logical negation of the
+first (the "dummy variable trap"), so a single binary indicator carries the
+same information with one fewer redundant column.
+
+Uses .map() rather than a `== 'Freehold'` comparison - `==` against NaN
+silently returns False, which would misclassify a genuinely unknown tenure
+type as Leasehold/0 rather than leaving it NaN. .map() preserves NaN as NaN
+if this column ever does have missing values in a future data pull.
+"""
+df['Freehold Indicator'] = df['Tenure Type'].map({'Freehold': 1, 'Leasehold': 0})
+print(f"'Freehold Indicator' value counts:\n{df['Freehold Indicator'].value_counts(dropna=False)}")
+print("\n" + "-"*60)
+
+print("\n--- Floor Range: ordinal encoding ---")
+
+"""
+Low/Medium/High have a real order (higher floor is a meaningfully different
+attribute, not an arbitrary label), so ordinal encoding preserves that
+monotonic relationship instead of discarding it into unordered one-hot
+columns. "Unknown" (filled in back in 3.5) doesn't fit that order, so it maps
+to NaN here rather than being forced into a fake rank.
+
+Floor_Range_Known keeps the Unknown/observed distinction visible as its own
+signal, the same pairing already used for Property Age/Is_Off_Plan.
+
+Filling Floor_Range_Ordinal's NaN (with the train-set median) is deliberately
+NOT done here - it happens in 3.11, after the train/test split, using only
+X_train's median, for the same leakage reason Completion Year / # of Floors /
+Total Units / Parking Lot's imputation is deferred there. Left as real NaN
+for now so 3.9's output isn't quietly contaminated by a full-dataset statistic.
+
+Floor_Range_Known uses .map() rather than `!= 'Unknown'` - Floor Range has 0
+missing today (filled with the string "Unknown" back in 3.5), but a `!=`
+comparison would silently treat a future genuine NaN as "known" (1) instead
+of leaving it NaN, if this step is ever reordered to run before 3.5's fill.
+"""
+df['Floor_Range_Ordinal'] = df['Floor Range'].map({'Low': 1, 'Medium': 2, 'High': 3})
+df['Floor_Range_Known'] = df['Floor Range'].map(lambda x: np.nan if pd.isna(x) else int(x != 'Unknown'))
+
+print(f"'Floor_Range_Ordinal' value counts (NaN = Unknown, imputed later in 3.11):\n{df['Floor_Range_Ordinal'].value_counts(dropna=False)}")
+print(f"\n'Floor_Range_Known' value counts:\n{df['Floor_Range_Known'].value_counts()}")
+print("\n" + "-"*60)
+
+print("\n--- Facilities: text cleanup + multi-hot encoding ---")
+
+"""
+Cleanup pipeline, applied before binarising: split on comma, strip whitespace,
+title-case for consistency, drop purely numeric junk (the same "10" artefact
+filtered in Listed_Facility_Count's Ad List 95706905).
+
+"Merge near-duplicate wording" (e.g. "Badminton" vs "Badminton Court") was
+planned but turns out to have nothing to merge: the full vocabulary across
+all 3793 rows was checked earlier and is exactly 14 distinct, non-overlapping
+facility names (Parking, Security, Playground, Swimming Pool, Lift,
+Gymnasium, Minimart, Barbeque area, Jogging Track, Multipurpose hall, Sauna,
+Tennis Court, Club house, Squash Court) plus the one junk "10" - no synonyms,
+no case variants. The merge step is a no-op here, kept in the pipeline in
+case a future data pull introduces messier wording.
+"""
+def clean_facility_list(facilities_text):
+    if pd.isna(facilities_text):
+        return []
+    items = [item.strip().title() for item in facilities_text.split(',')]
+    return [item for item in items if item and not item.isdigit()]
+
+facility_lists = df['Facilities'].apply(clean_facility_list)
+
+mlb = MultiLabelBinarizer()
+facility_encoded = pd.DataFrame(
+    mlb.fit_transform(facility_lists),
+    columns=['Has_' + c.replace(' ', '_') for c in mlb.classes_],
+    index=df.index
+).astype(int)  # MultiLabelBinarizer already outputs int64, but made explicit rather than relied on
+df = pd.concat([df, facility_encoded], axis=1)
+
+print(f"Distinct facility types found: {len(mlb.classes_)}")
+print(f"Columns created: {list(facility_encoded.columns)}")
+print(f"\nColumn totals:\n{facility_encoded.sum().sort_values(ascending=False)}")
+print("\n" + "-"*60)
+
+df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
+print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
+
+# ============================================================
+# 3.7 Feature Selection (executed after 3.8/3.9, since it drops
+# columns that 3.8/3.9 needed to still exist while extracting from them)
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.7: FEATURE SELECTION")
+print("="*60)
+
+print("\n--- Stage A: columns with no predictive value, unrelated to any 3.8/3.9 engineering ---")
+
+"""
+These were never going to be used, encoded or otherwise - dropped purely on
+their own merits (unstructured text, unique identifier, zero variance, agent/
+listing-firm metadata unrelated to the property, or high cardinality with no
+extractable pattern), independent of anything built in 3.8/3.9.
+"""
+cols_no_engineering = [
+    'description', 'Ad List',
+    'Nearby School', 'Nearby Mall', 'Nearby Railway Station',
+    'Category',
+    'Firm Type', 'Firm Number', 'REN Number',
+    'Building Name', 'Developer',
+]
+
+print("Non-null counts before drop:")
+for c in cols_no_engineering:
+    print(f"  {c:25s} {df[c].notna().sum()} non-null")
+
+print("\n--- Stage B: raw columns already superseded by a 3.8/3.9 engineered feature ---")
+
+"""
+Each of these was kept alive specifically so 3.8/3.9 could extract from it
+(State from Address, Has_X flags from the 7 nearby-amenity columns, Freehold
+Indicator from Tenure Type, one-hot from Property Type, Is_Non_Bumi_Lot from
+Land Title, Floor_Range_Ordinal/Known from Floor Range, multi-hot from
+Facilities). Now that every extraction is done, the raw source column is
+redundant with its own derived feature(s) already in df.
+
+State is included here too, not just Address - it's a two-step chain
+(Address -> State in 3.8, then State -> one-hot columns in 3.9), so State
+itself is just as superseded by State_Selangor/State_Penang/etc. as Property
+Type or Land Title are by their own encodings.
+"""
+cols_replaced_by_engineering = [
+    'Address',
+    'State',
+    'Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station',
+    'Tenure Type',
+    'Property Type',
+    'Land Title',
+    'Floor Range',
+    'Facilities',
+]
+
+print("Non-null counts before drop:")
+for c in cols_replaced_by_engineering:
+    print(f"  {c:25s} {df[c].notna().sum()} non-null")
+
+shape_before_drop = df.shape
+df = df.drop(columns=cols_no_engineering + cols_replaced_by_engineering)
+
+print(f"\nShape before 3.7 drop: {shape_before_drop}")
+print(f"Shape after 3.7 drop:  {df.shape}")
+print(f"Columns dropped: {len(cols_no_engineering) + len(cols_replaced_by_engineering)}")
+print("\n" + "-"*60)
+
+df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
+print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
