@@ -5,30 +5,13 @@ column into a model-ready numeric form. Runs after 3.8 (Feature Engineering)
 and before 3.7 (Feature Selection) — the raw text columns encoded here are
 only dropped once their encoded replacements exist in df.
 
-## State — one-hot
-
-- NaN (85 rows, genuine missing Address) filled with the explicit string
-  `"Unknown"` before encoding — the same treatment as Floor Range in 3.5 — so
-  `pd.get_dummies()` gives it its own visible `State_Unknown` column instead of
-  silently marking all 12 other dummy columns as 0 (which would look identical
-  to "known and simply not any of these states").
-- `drop_first=True` drops the alphabetically-first category (`Johor`) as the
-  reference level, to avoid the dummy-variable trap for linear models.
-- Result: 13 categories (12 real/merged states + Unknown) → 12 one-hot columns.
-
-## Property Type — rare-category merge, then one-hot
-
-- Raw distribution: Condominium (1618), Apartment (1421), Service Residence
-  (483), Flat (233), Others (16), Studio (13), Duplex (5), Townhouse Condo (4).
-- Others/Studio/Duplex/Townhouse Condo (<20 listings each, <1% combined)
-  merged into a single `Other` category (38 rows) before one-hot — otherwise
-  each would produce a one-hot column that's almost entirely 0, and an 80:20
-  split could easily leave one entirely absent from train or test.
-- `drop_first=True` → 4 one-hot columns (Apartment dropped as reference).
-- **Data quality observation for the report**: Duplex and Townhouse Condo
-  appearing under "Property Type" in what the source describes as an
-  apartment/condominium dataset suggests the source's own categorisation
-  isn't fully clean — worth a mention, not something corrected here.
+**State and Property Type are NOT encoded in this section**, unlike Land
+Title/Tenure Type/Floor Range/Facilities below. Both have a rare-category
+merge threshold (State <10, Property Type <20 listings) that is a statistic
+computed from data, so per the pipeline's leakage rule it must be fit on
+`X_train` only, after the 3.11 split — not on the full pre-split `df` the
+way this section operates. Their rare-merge + one-hot encoding is documented
+in `notes_train_test_split_log.md` (Part 3), not here.
 
 ## Land Title — rare-category merge, then binary encoding
 
@@ -89,10 +72,10 @@ only dropped once their encoded replacements exist in df.
 
 ## Dtype check (Step 7 of the 3.9 plan)
 
-Every encoding-produced column was confirmed `int64`, not `bool`:
-`state_dummies`/`property_type_dummies` via explicit `.astype(int)`,
-`facility_encoded` via explicit `.astype(int)`, `Freehold Indicator` via
-`.map()` to an int dict, `Is_Non_Bumi_Lot`/`Floor_Range_Known` via
+Every encoding-produced column in this section was confirmed `int64`, not
+`bool`: `facility_encoded` via explicit `.astype(int)`, `Freehold Indicator`
+via `.map()` to an int dict, `Is_Non_Bumi_Lot`/`Floor_Range_Known` via
 `.astype(int)`. `Floor_Range_Ordinal` is the one intentional exception
 (float64, since it's an ordinal scale with legitimate pending NaN, not a 0/1
-flag).
+flag). `state_dummies_train`/`property_type_dummies_train` (Part 3, in
+`notes_train_test_split_log.md`) follow the same `.astype(int)` convention.
