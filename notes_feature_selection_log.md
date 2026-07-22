@@ -7,7 +7,7 @@ kept alive through 3.8/3.9 because those sections needed to extract from or
 encode them first — dropping in report order (3.7 before 3.8) would destroy
 the raw material before extraction could happen.
 
-26 columns dropped in total, in two stages, each printed with non-null counts
+24 columns dropped in total, in two stages, each printed with non-null counts
 before the drop (same "evidence before deletion" habit used since 3.1).
 
 ## Stage A — never going to be used, unrelated to any 3.8/3.9 engineering
@@ -31,7 +31,6 @@ before the drop (same "evidence before deletion" habit used since 3.1).
 | Column | Non-null (of 3793) | Superseded by |
 |---|---|---|
 | `Address` | 3708 | `State` (3.8) |
-| `State` | 3708 | Two-step chain: `Address` → `State` (3.8) → `State_Selangor`/`State_Penang`/etc. one-hot columns (3.9). `State` itself is superseded once the one-hot columns exist, the same way `Property Type`/`Land Title` are. |
 | `Completion Year` | 1886 | Verified `Property Age == REFERENCE_YEAR - Completion Year` exactly, zero exceptions (not approximate overlap like `Total_Rooms` — the same variable in different units). Kept `Property Age`, dropped this. |
 | `Bus Stop` | 667 | `Has_Bus_Stop` (3.8) |
 | `Mall` | 448 | `Has_Mall` (3.8) |
@@ -41,28 +40,41 @@ before the drop (same "evidence before deletion" habit used since 3.1).
 | `Highway` | 135 | `Has_Highway` (3.8) |
 | `Railway Station` | 451 | `Has_Railway_Station` (3.8) |
 | `Tenure Type` | 3793 | `Freehold Indicator` (3.9) |
-| `Property Type` | 3793 | 4 one-hot columns (3.9, after rare-category merge) |
 | `Land Title` | 3793 | `Is_Non_Bumi_Lot` (3.9, after rare-category merge) |
 | `Floor Range` | 3793 | `Floor_Range_Ordinal` + `Floor_Range_Known` (3.9) |
 | `Facilities` | 3186 | 14 `Has_<Facility>` multi-hot columns (3.9) + `Listed_Facility_Count` (3.8) |
 
+**`State` and `Property Type` are deliberately NOT in this table** — unlike
+every other row here, their "superseding" encoding (one-hot, after a rare-
+category merge) is fit-dependent: the merge threshold is a statistic of the
+data, so per the pipeline's leakage rule it has to be computed from `X_train`
+only, after the 3.11 split. Both stay alive as raw text in `df` past this
+section and are only dropped later, from `X_train`/`X_test` individually,
+right after that encoding runs in Part 3 (see `notes_train_test_split_log.md`).
+
 ## Net effect
 
-Shape before drop: (3793, 76) → after drop: (3793, 50). (`Is_Off_Plan` was
-already removed earlier, directly in 3.8 — see `notes_feature_engineering_log.md`
-— which is why the starting count here is 76, not 77.)
+Shape before drop: (3793, 60) → after drop: (3793, 36). (`Is_Off_Plan` was
+already tried and dropped earlier, directly in 3.8 — see
+`notes_feature_engineering_log.md` — so it was never in `df` to begin with.)
 
 ## Post-drop duplicate re-check — found real train/test leakage, fixed without deleting rows
 
 3.2 de-duplicated the original 32-column dataset (0 duplicates remained), but
 that check is blind to duplicates that only become identical once
-identifying columns are gone. Re-checked on the 50-column post-drop df:
+identifying columns are gone. Re-checked on the 36-column post-drop df
+(which still includes raw `State`/`Property Type` text, since those two are
+kept alive past this section — see above):
 
 - **67 groups of row-identical listings (136 rows total)** on the remaining
-  50 columns, including `price` matching too (not a features-match-but-
+  36 columns, including `price` matching too (not a features-match-but-
   price-differs conflict, which would have been a separate, harder problem).
-- Verified this wasn't cosmetic: with a plain random split, **20 of these 67
-  groups landed split across `X_train`/`X_test`**, meaning 26 test rows were
+  Same group count as when this check was run on the previous (50-column,
+  State/Property Type already one-hot encoded) version of the pipeline —
+  confirms rare-category merging never changes which rows agree/disagree
+  with each other on a column, only which label the value gets.
+- Verified this wasn't cosmetic: a plain random split was tested and
+  confirmed to tear some of these groups apart, landing test rows that were
   exact duplicates of a training row - silently inflating any evaluation
   metric computed on that split.
 
@@ -83,7 +95,7 @@ the Stage-3 near-duplicate relistings in `notes_near_duplicate_relistings.md`
 ("use a group-aware train/test split... this avoids leakage independent of
 the dedup decision"). All 3793 rows are retained; confirmed zero duplicate
 groups split across train/test after the fix, and actual test proportion is
-0.201 (vs the 0.2 target - the group constraint only nudges 2-3 rows at a
+0.202 (vs the 0.2 target - the group constraint only nudges 2-3 rows at a
 time, negligible effect on the split ratio).
 
 ## Features engineered, currently still in df, flagged as low-value candidates

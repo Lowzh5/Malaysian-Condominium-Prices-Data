@@ -630,19 +630,15 @@ print(f"Address present, no segment matched a real state (-> NaN): {no_state_in_
 print(f"Total 'State' missing after extraction:                    {df['State'].isna().sum()}")
 
 """
-Rare states (fewer than 10 listings) are merged into 'Other' - the same
-treatment already applied to Property Type / Land Title's sparse categories.
-Left as their own one-hot category, a state with only 1-2 listings would very
-likely land entirely in train or entirely in test after the 80:20 split,
-giving that column zero learnable signal or mismatched train/test columns.
+Rare-category merge (states with fewer than 10 listings -> 'Other') and
+one-hot encoding are deferred to Part 3 of the pipeline, AFTER the train/test
+split - the <10 threshold is a statistic computed from data, so it must be
+fit on X_train only and then applied to X_test, the same leakage reasoning
+already used for Floor_Range_Ordinal's median fill. 'State' is kept here as
+plain extracted text; row_group_ids (built right after 3.7 below) is
+deliberately computed on this pre-merge, pre-encoding text value.
 """
-RARE_STATE_THRESHOLD = 10
-state_counts = df['State'].value_counts()
-rare_states = state_counts[state_counts < RARE_STATE_THRESHOLD].index.tolist()
-print(f"\nRare states (<{RARE_STATE_THRESHOLD} listings), merged into 'Other': {rare_states}")
-df['State'] = df['State'].replace(rare_states, 'Other')
-
-print("\n--- 'State' value counts after extraction + rare-category merge ---")
+print("\n--- 'State' value counts after extraction (rare-category merge + encoding deferred to Part 3, post-split) ---")
 print(df['State'].value_counts(dropna=False))
 print("\n" + "-"*60)
 
@@ -778,65 +774,15 @@ print("\n" + "="*60)
 print("STEP 3.9: CATEGORICAL ENCODING")
 print("="*60)
 
-print("\n--- State: one-hot encoding ---")
-
 """
-State has no inherent order between categories (Selangor isn't "more" or
-"less" than Penang), so one-hot is the right encoding - unlike Floor Range,
-which gets ordinal encoding later because Low/Medium/High has a real order.
-
-NaN must be turned into an explicit "Unknown" category before encoding, not
-left as NaN - pd.get_dummies() would otherwise silently mark all 15 dummy
-columns as 0 for those 85 rows, which looks identical to "known and simply
-not any of these states" rather than "state genuinely not on record". Filling
-with the string "Unknown" first (same treatment as Floor Range in 3.5) makes
-that distinction an explicit, visible column instead of a hidden zero-row.
-
-drop_first=True drops one category's dummy column to avoid the "dummy
-variable trap" (perfect multicollinearity - if a linear model knows all other
-dummies are 0, the dropped one is redundant information). Tree-based models
-don't need this, but it doesn't hurt them either, so it's kept for safety
-since the final model choice isn't fixed yet.
+State and Property Type one-hot encoding (including their rare-category
+merges) are deferred to Part 3 of the pipeline, after the train/test split -
+both merge thresholds (State <10, Property Type <20 listings) are statistics
+computed from data, so per the same leakage rule applied everywhere else in
+this pipeline (Floor_Range_Ordinal's median, the 3.11 imputation medians,
+3.10's scaler), they must be fit on X_train only and then applied to X_test.
+See Part 3 (after the 3.11 split) for both encodings.
 """
-df['State'] = df['State'].fillna('Unknown')
-
-state_dummies = pd.get_dummies(df['State'], prefix='State', drop_first=True).astype(int)
-state_dummies.columns = [c.replace(' ', '_') for c in state_dummies.columns]
-df = pd.concat([df, state_dummies], axis=1)
-
-print(f"'State' unique categories (incl. Unknown): {sorted(df['State'].unique())}")
-print(f"\nOne-hot columns created ({len(state_dummies.columns)}): {list(state_dummies.columns)}")
-print(state_dummies.sum().sort_values(ascending=False))
-print("\n" + "-"*60)
-
-print("\n--- Property Type: rare-category merge + one-hot encoding ---")
-
-"""
-No missing values here (unlike State), so no "Unknown" category is needed.
-Duplex / Townhouse Condo / Studio / Others each have fewer than 20 listings
-out of 3793 - one-hot on these individually would produce columns that are
-almost entirely 0, and an 80:20 split could easily leave one of them with
-zero rows on either side (train never sees it, or test can't be scored on
-it). Merged into 'Other' first, same treatment already used for State's rare
-states. Also worth noting for the report: Duplex / Townhouse Condo existing
-under a column named "Property Type" for what the source describes as an
-apartment/condominium dataset suggests the source's own categorisation isn't
-fully clean - a data quality observation, not something fixed here.
-"""
-RARE_PROPERTY_TYPE_THRESHOLD = 20
-property_type_counts = df['Property Type'].value_counts()
-rare_property_types = property_type_counts[property_type_counts < RARE_PROPERTY_TYPE_THRESHOLD].index.tolist()
-print(f"'Property Type' counts before merge:\n{property_type_counts}\n")
-print(f"Rare Property Types (<{RARE_PROPERTY_TYPE_THRESHOLD} listings), merged into 'Other': {rare_property_types}")
-df['Property Type'] = df['Property Type'].replace(rare_property_types, 'Other')
-
-property_type_dummies = pd.get_dummies(df['Property Type'], prefix='PropertyType', drop_first=True).astype(int)
-property_type_dummies.columns = [c.replace(' ', '_') for c in property_type_dummies.columns]
-df = pd.concat([df, property_type_dummies], axis=1)
-
-print(f"\n'Property Type' counts after merge:\n{df['Property Type'].value_counts()}")
-print(f"\nOne-hot columns created ({len(property_type_dummies.columns)}): {list(property_type_dummies.columns)}")
-print("\n" + "-"*60)
 
 print("\n--- Land Title: rare-category merge, then binary encoding ---")
 
@@ -985,16 +931,18 @@ print("\n--- Stage B: raw columns already superseded by a 3.8/3.9 engineered fea
 
 """
 Each of these was kept alive specifically so 3.8/3.9 could extract from it
-(State from Address, Has_X flags from the 7 nearby-amenity columns, Freehold
-Indicator from Tenure Type, one-hot from Property Type, Is_Non_Bumi_Lot from
-Land Title, Floor_Range_Ordinal/Known from Floor Range, multi-hot from
-Facilities). Now that every extraction is done, the raw source column is
-redundant with its own derived feature(s) already in df.
+(Has_X flags from the 7 nearby-amenity columns, Freehold Indicator from
+Tenure Type, Is_Non_Bumi_Lot from Land Title, Floor_Range_Ordinal/Known from
+Floor Range, multi-hot from Facilities). Now that every extraction is done,
+the raw source column is redundant with its own derived feature(s) already
+in df.
 
-State is included here too, not just Address - it's a two-step chain
-(Address -> State in 3.8, then State -> one-hot columns in 3.9), so State
-itself is just as superseded by State_Selangor/State_Penang/etc. as Property
-Type or Land Title are by their own encodings.
+State and Property Type are deliberately NOT dropped here, unlike the other
+engineered-from columns. Their rare-category merge + one-hot encoding is
+fit-dependent (the merge threshold is a statistic of the data) and is
+deferred to Part 3, after the 3.11 split, so both raw text columns have to
+stay alive in df past this point - they're dropped later, from X_train/
+X_test individually, right after that encoding runs.
 
 Completion Year is dropped for a different, stronger reason than the others:
 verified Property Age == REFERENCE_YEAR - Completion Year exactly, for every
@@ -1005,10 +953,8 @@ would hand a linear model perfectly collinear inputs for no benefit.
 cols_replaced_by_engineering = [
     'Address',
     'Completion Year',
-    'State',
     'Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station',
     'Tenure Type',
-    'Property Type',
     'Land Title',
     'Floor Range',
     'Facilities',
@@ -1031,9 +977,11 @@ print("\n--- Post-drop duplicate re-check ---")
 """
 3.2 de-duplicated the original 32-column dataset, but that check can't see
 duplicates that only become identical once identifying columns (Ad List,
-Address, Building Name, description, etc.) are gone. Verified: dropping
-those 26 Stage A/B columns makes 67 groups of listings (136 rows) look
-row-identical on the remaining 50 columns.
+Address, Building Name, description, etc.) are gone. Computed fresh below on
+whatever df looks like after this section's Stage A/B drop - counts are
+printed dynamically rather than hardcoded, since the column set dropped here
+(24 columns; State and Property Type are deliberately kept, see Stage B's
+docstring above) differs from earlier pipeline iterations.
 
 These rows are NOT removed - unlike the 3.2 exact duplicates (which really
 were the same scrape captured twice), these are genuinely different real
@@ -1041,7 +989,7 @@ listings (different Ad List, Address, description) that simply can't be
 told apart once the identifying columns are gone. Deleting them would throw
 away real observations for no data-quality reason.
 
-The actual risk is narrower: if one of these 67 groups gets split across the
+The actual risk is narrower: if one of these groups gets split across the
 train/test split, the test set ends up containing a row the model already
 saw in training, silently inflating any evaluation metric. The fix belongs
 in 3.11 (a group-aware split, keeping every group on one side), not here -
@@ -1049,6 +997,14 @@ this matches the same principle already recorded for the Stage-3 near-
 duplicate relistings in notes_near_duplicate_relistings.md: "use a group-
 aware train/test split... this avoids leakage independent of the dedup
 decision."
+
+row_group_ids is computed HERE, right after this section's drop, and BEFORE
+State/Property Type are merged/encoded in Part 3 - grouping on the still-raw,
+unmerged text values gives the same group structure as grouping after the
+merge would (verified: rare-category merging only collapses distinct labels
+within a column into 'Other', it never changes which rows already agreed or
+disagreed with each other on that column), so there is no need to wait for
+Part 3 to compute this.
 """
 row_group_ids = df.groupby(list(df.columns), dropna=False).ngroup()
 group_sizes = row_group_ids.value_counts()
@@ -1078,14 +1034,15 @@ X_train/y_train are guaranteed to be the same rows (two separate calls risk
 misaligned rows even with the same random_state).
 
 Group-aware split (GroupShuffleSplit), not a plain train_test_split - 3.7's
-post-drop duplicate check found 67 groups of row-identical listings (136
-rows) that a plain random split could tear apart, landing some rows of the
-same group in train and others in test (test would then contain a row
-identical to one the model trained on, inflating evaluation metrics). Groups
-are 3793 IDs, one per unique row-content group - 3657 singleton groups (a
-listing with no row-identical twin) plus the 67 multi-row groups, so the
-80:20 ratio is barely affected in practice (each multi-row group only forces
-2-3 rows to move together, out of 3793).
+post-drop duplicate check (printed above) found a handful of groups of
+row-identical listings that a plain random split could tear apart, landing
+some rows of the same group in train and others in test (test would then
+contain a row identical to one the model trained on, inflating evaluation
+metrics). row_group_ids has one ID per unique row-content group - mostly
+singleton groups (a listing with no row-identical twin) plus the small
+number of multi-row groups reported above, so the 80:20 ratio is barely
+affected in practice (each multi-row group only forces a couple of rows to
+move together, out of thousands).
 
 Regression target (price, continuous), not classification, so no stratify=.
 """
@@ -1109,6 +1066,114 @@ print(f"Actual test proportion: {len(X_test) / (len(X_train) + len(X_test)):.3f}
 assert len(X_train) == len(y_train)
 assert len(X_test) == len(y_test)
 
+# ============================================================
+# Part 3 - statistic-fitting steps (fit on X_train only, applied to X_test)
+# ============================================================
+X_train = X_train.copy()
+X_test = X_test.copy()
+
+print("\n--- State: rare-category merge + one-hot encoding (fit on X_train only) ---")
+
+"""
+State has no inherent order between categories (Selangor isn't "more" or
+"less" than Penang), so one-hot is the right encoding - unlike Floor Range,
+which gets ordinal encoding because Low/Medium/High has a real order.
+
+NaN is turned into an explicit "Unknown" category before encoding, not left
+as NaN - get_dummies() would otherwise silently mark all dummy columns as 0
+for missing rows, identical to "known and simply not any of these states"
+rather than "state genuinely not on record". This fill is a constant, not a
+fitted statistic, so it's safe to apply to X_train and X_test independently.
+
+The <10-listings rare-category threshold IS a fitted statistic (unlike the
+fill above, it depends on which categories are common enough to keep), so
+it's computed from X_train's value_counts() ONLY, then the same rare-category
+list is applied to X_test's State column - the same leakage rule already
+used for the 3.11 imputation medians and 3.10's scaler.
+
+X_test's State is cast to a Categorical using X_train's post-merge category
+list (not encoded independently) - this guarantees get_dummies drops the
+same reference category on both sides. Any category X_train never saw at all
+becomes NaN in X_test and gets an all-zero dummy row, the same as a proper
+unseen-category fallback in a deployed model. The reindex below is then just
+a safety net for column order/coverage.
+"""
+X_train['State'] = X_train['State'].fillna('Unknown')
+X_test['State'] = X_test['State'].fillna('Unknown')
+
+RARE_STATE_THRESHOLD = 10
+train_state_counts = X_train['State'].value_counts()
+rare_states = train_state_counts[train_state_counts < RARE_STATE_THRESHOLD].index.tolist()
+print(f"Rare states in X_train (<{RARE_STATE_THRESHOLD} listings), merged into 'Other': {rare_states}")
+
+X_train['State'] = X_train['State'].replace(rare_states, 'Other')
+X_test['State'] = X_test['State'].replace(rare_states, 'Other')
+
+state_categories = sorted(X_train['State'].unique())
+X_train['State'] = pd.Categorical(X_train['State'], categories=state_categories)
+# Any X_test value absent from X_train entirely (e.g. a singleton state that
+# landed only in the test split) isn't in state_categories and isn't in
+# rare_states either (rare_states only lists values X_train actually saw) -
+# cleared to NaN explicitly before the Categorical cast, since pandas now
+# deprecates letting the cast do that implicitly.
+X_test['State'] = X_test['State'].where(X_test['State'].isin(state_categories))
+X_test['State'] = pd.Categorical(X_test['State'], categories=state_categories)
+
+state_dummies_train = pd.get_dummies(X_train['State'], prefix='State', drop_first=True).astype(int)
+state_dummies_train.columns = [c.replace(' ', '_') for c in state_dummies_train.columns]
+state_dummies_test = pd.get_dummies(X_test['State'], prefix='State', drop_first=True).astype(int)
+state_dummies_test.columns = [c.replace(' ', '_') for c in state_dummies_test.columns]
+state_dummies_test = state_dummies_test.reindex(columns=state_dummies_train.columns, fill_value=0)
+
+X_train = pd.concat([X_train, state_dummies_train], axis=1)
+X_test = pd.concat([X_test, state_dummies_test], axis=1)
+
+print(f"'State' one-hot columns created ({len(state_dummies_train.columns)}): {list(state_dummies_train.columns)}")
+print(state_dummies_train.sum().sort_values(ascending=False))
+print("\n" + "-"*60)
+
+print("\n--- Property Type: rare-category merge + one-hot encoding (fit on X_train only) ---")
+
+"""
+Same fit-on-X_train-only reasoning as State above, with a <20-listings
+threshold. Property Type has no missing values (unlike State), so no
+"Unknown" fill is needed first. Duplex / Townhouse Condo / Studio / Others
+each have fewer than 20 listings out of 3793 - one-hot on these individually
+would produce columns that are almost entirely 0, and the group-aware split
+could easily leave one of them with zero rows in X_train.
+"""
+RARE_PROPERTY_TYPE_THRESHOLD = 20
+train_property_type_counts = X_train['Property Type'].value_counts()
+rare_property_types = train_property_type_counts[train_property_type_counts < RARE_PROPERTY_TYPE_THRESHOLD].index.tolist()
+print(f"'Property Type' counts in X_train before merge:\n{train_property_type_counts}\n")
+print(f"Rare Property Types in X_train (<{RARE_PROPERTY_TYPE_THRESHOLD} listings), merged into 'Other': {rare_property_types}")
+
+X_train['Property Type'] = X_train['Property Type'].replace(rare_property_types, 'Other')
+X_test['Property Type'] = X_test['Property Type'].replace(rare_property_types, 'Other')
+
+property_type_categories = sorted(X_train['Property Type'].unique())
+X_train['Property Type'] = pd.Categorical(X_train['Property Type'], categories=property_type_categories)
+X_test['Property Type'] = X_test['Property Type'].where(X_test['Property Type'].isin(property_type_categories))
+X_test['Property Type'] = pd.Categorical(X_test['Property Type'], categories=property_type_categories)
+
+property_type_dummies_train = pd.get_dummies(X_train['Property Type'], prefix='PropertyType', drop_first=True).astype(int)
+property_type_dummies_train.columns = [c.replace(' ', '_') for c in property_type_dummies_train.columns]
+property_type_dummies_test = pd.get_dummies(X_test['Property Type'], prefix='PropertyType', drop_first=True).astype(int)
+property_type_dummies_test.columns = [c.replace(' ', '_') for c in property_type_dummies_test.columns]
+property_type_dummies_test = property_type_dummies_test.reindex(columns=property_type_dummies_train.columns, fill_value=0)
+
+X_train = pd.concat([X_train, property_type_dummies_train], axis=1)
+X_test = pd.concat([X_test, property_type_dummies_test], axis=1)
+
+print(f"\n'Property Type' counts in X_train after merge:\n{X_train['Property Type'].value_counts()}")
+print(f"\nOne-hot columns created ({len(property_type_dummies_train.columns)}): {list(property_type_dummies_train.columns)}")
+print("\n" + "-"*60)
+
+print("\n--- Dropping raw State / Property Type text columns (superseded by the one-hot columns above) ---")
+X_train = X_train.drop(columns=['State', 'Property Type'])
+X_test = X_test.drop(columns=['State', 'Property Type'])
+print("\n" + "-"*60)
+
 print("\n--- Missing-value imputation (median + indicator, fit on X_train only) ---")
 
 """
@@ -1126,9 +1191,6 @@ already-observed values compute it correctly), then the SAME value is used to
 fill X_test - X_test's own median is never touched, which is what avoids
 leaking test-set information into the imputation.
 """
-X_train = X_train.copy()
-X_test = X_test.copy()
-
 IMPUTE_COLS = {
     'Property Age': 'Property_Age_Missing',
     '# of Floors': 'Num_Floors_Missing',
@@ -1279,13 +1341,13 @@ X_train/X_test/df), not re-typed by hand - so this table can't silently
 drift out of sync with what the pipeline actually did.
 
 "Row-identical groups" is intentionally NOT "remaining duplicate rows" -
-df.duplicated().sum() would report 69 here, which would misleadingly read as
-"a cleanup step that didn't finish." It's the opposite: these 136 rows
-(67 groups) are different real listings that were deliberately kept (not
-3.2's kind of duplicate - see the post-drop re-check above), with the actual
-train/test leakage risk handled by 3.11's group-aware split instead. This
-row reports the group count as evidence that risk was addressed, not as an
-outstanding cleanup item.
+df.duplicated().sum() would report a nonzero count here, which would
+misleadingly read as "a cleanup step that didn't finish." It's the opposite:
+these rows are different real listings that were deliberately kept (not
+3.2's kind of duplicate - see the 3.7 post-drop re-check above), with the
+actual train/test leakage risk handled by 3.11's group-aware split instead.
+This row reports the group count as evidence that risk was addressed, not as
+an outstanding cleanup item.
 """
 _train_tagged = X_train.assign(price=y_train.values, _src='train')
 _test_tagged = X_test.assign(price=y_test.values, _src='test')
@@ -1296,15 +1358,20 @@ _sources_per_group = _cross_dup.groupby(_feature_cols, dropna=False)['_src'].app
 cross_split_leaked_groups = int((_sources_per_group.apply(len) > 1).sum())
 
 """
-X_train/X_test have more columns than df's pre-split feature count (49) -
-3.11's imputation adds a *_Missing indicator flag per imputed column (5 of
-them: Property_Age_Missing, Num_Floors_Missing, Total_Units_Missing,
-Parking_Lot_Missing, Property_Size_Missing), which don't exist in df. Listed
-explicitly here (computed as a set difference, not hardcoded as "+5") so a
-reader comparing "49" against X_train.shape's "54" doesn't mistake the gap
-for an arithmetic error.
+X_train/X_test' column count differs from df's pre-split feature count for
+two reasons, both introduced in Part 3 (after the 3.11 split, fit on X_train
+only): State/Property Type's one-hot columns are ADDED (their raw text
+columns stay in df - only dropped from X_train/X_test, once the fit-dependent
+merge+encoding is done - see the 3.7 Stage B docstring), and a *_Missing
+indicator flag is ADDED per imputed column. Each count below is read from a
+variable already computed earlier in Part 3 (state_dummies_train /
+property_type_dummies_train / IMPUTE_COLS), not hardcoded, so this table
+can't silently drift out of sync with what the pipeline actually did.
 """
-indicator_cols_added = [c for c in X_train.columns if c not in df.drop(columns=['price']).columns]
+state_onehot_added = len(state_dummies_train.columns)
+property_type_onehot_added = len(property_type_dummies_train.columns)
+missing_indicator_flags_added = len(IMPUTE_COLS)
+raw_cols_dropped_post_split = 2  # State, Property Type - dropped from X_train/X_test only (Part 3), not from df
 
 summary_table = pd.DataFrame({
     "Item": [
@@ -1314,8 +1381,11 @@ summary_table = pd.DataFrame({
         "Non-numeric features remaining",
         "Raw features retained as-is",
         "Raw features dropped (Section 3.7)",
-        "Engineered/encoded features created (3.8+3.9)",
-        "Missing-value indicator flags added (Section 3.11)",
+        "Engineered features created (3.8+3.9 fixed rules)",
+        "State one-hot columns added (Part 3, fit on X_train)",
+        "Property Type one-hot columns added (Part 3, fit on X_train)",
+        "Raw State/Property Type columns dropped post-split (Part 3)",
+        "Missing-value indicator flags added (Part 3)",
         "Final number of features in X_train/X_test",
         "Training set shape",
         "Testing set shape",
@@ -1331,7 +1401,10 @@ summary_table = pd.DataFrame({
         len(retained_raw_cols),
         len(dropped_cols),
         len(engineered_cols),
-        len(indicator_cols_added),
+        state_onehot_added,
+        property_type_onehot_added,
+        raw_cols_dropped_post_split,
+        missing_indicator_flags_added,
         X_train.shape[1],
         str(X_train.shape),
         str(X_test.shape),
