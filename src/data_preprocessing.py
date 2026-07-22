@@ -5,16 +5,17 @@ import re
 import joblib
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
 import seaborn as sns
-from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
+from sklearn.model_selection import GroupShuffleSplit
 
 pd.set_option('display.max_columns', None)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 csv_path = os.path.join(BASE_DIR, "data", "raw", "houses.csv")
 df = pd.read_csv(csv_path)
+RAW_COLUMNS = list(df.columns)  # snapshot for 3.12's summary - kept vs dropped vs engineered
 
 DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
@@ -78,18 +79,15 @@ print("\n--- Missing value count per row (distribution) ---")
 missing_per_row = df.isna().sum(axis=1)
 print(missing_per_row.describe())
 
-fig, ax = plt.subplots(figsize=(11, 6))
-sns.heatmap(df.isna(), cbar=False, cmap="viridis", ax=ax)
-ax.set_title("Missing Value Map After Standardisation")
-ax.set_xlabel("Column")
-ax.set_ylabel("Row index")
-legend_handles = [
-    Patch(facecolor=plt.get_cmap("viridis")(0.0), label="Non-null (value present)"),
-    Patch(facecolor=plt.get_cmap("viridis")(1.0), label="Null (missing)")
-]
-ax.legend(handles=legend_handles, loc="lower left", bbox_to_anchor=(0, -0.45), frameon=True)
+missing_cols = miss_summary[miss_summary["missing_count"] > 0].sort_values("missing_count")
+fig, ax = plt.subplots(figsize=(9, max(4, 0.35 * len(missing_cols))))
+bars = ax.barh(missing_cols.index, missing_cols["missing_count"], color="#4C72B0")
+ax.set_title("Missing Value Count per Column After Standardisation")
+ax.set_xlabel("Missing count")
+ax.bar_label(bars, labels=[f"{c} ({p}%)" for c, p in zip(missing_cols["missing_count"], missing_cols["missing_pct"])],
+             padding=3, fontsize=8)
 plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig01_missing_map.png"), dpi=150, bbox_inches="tight")
+plt.savefig(os.path.join(DOWNLOADS_DIR, "fig01_missing_bar.png"), dpi=150, bbox_inches="tight")
 plt.close()
 
 # ============================================================
@@ -627,10 +625,9 @@ df['State'] = df['Address'].apply(extract_state_from_address)
 
 address_missing = df['Address'].isna().sum()
 no_state_in_any_segment = df['State'].isna().sum() - address_missing
-print(f"Address missing (State inherits NaN):                                {address_missing}")
-print(f"Address present but no segment matches a real state (state genuinely")
-print(f"not written anywhere in the address), set to NaN:                    {no_state_in_any_segment}")
-print(f"Total 'State' missing after extraction:                              {df['State'].isna().sum()}")
+print(f"Address missing (-> State = NaN):                          {address_missing}")
+print(f"Address present, no segment matched a real state (-> NaN): {no_state_in_any_segment}")
+print(f"Total 'State' missing after extraction:                    {df['State'].isna().sum()}")
 
 """
 Rare states (fewer than 10 listings) are merged into 'Other' - the same
@@ -672,24 +669,17 @@ df['Property Age'] = df['Completion Year'].apply(compute_property_age)
 """
 A negative age (Completion Year after REFERENCE_YEAR) isn't invalid data - it
 means the unit was still under construction / sold off-plan at the time of
-collection, which is a normal, common scenario in Malaysian property listings
-and shouldn't be discarded. "Age" simply doesn't apply yet to an unbuilt
-property, so Property Age is correctly left NaN for these rows - but that NaN
-would otherwise be indistinguishable from a genuinely missing Completion Year.
-Is_Off_Plan preserves that distinction as its own signal instead of losing it.
+collection, a normal, common scenario in Malaysian property listings. "Age"
+simply doesn't apply yet to an unbuilt property, so Property Age is correctly
+left NaN for these rows (Is_Off_Plan, which would have preserved that as its
+own signal, was tried and dropped - see the record further below).
 """
-df['Is_Off_Plan'] = df['Completion Year'].apply(
-    lambda cy: np.nan if pd.isna(cy) else int(cy > REFERENCE_YEAR)
-)
-
 completion_missing = df['Completion Year'].isna().sum()
 off_plan_count = (df['Completion Year'] > REFERENCE_YEAR).sum()
-print(f"Completion Year missing (Property Age inherits NaN, Is_Off_Plan = NaN):   {completion_missing}")
-print(f"Completion Year after {REFERENCE_YEAR} - off-plan, Property Age = NaN,")
-print(f"Is_Off_Plan = 1 instead of being discarded:                               {off_plan_count}")
-print(f"Total 'Property Age' missing:                                             {df['Property Age'].isna().sum()}")
+print(f"Completion Year missing (-> Property Age = NaN):          {completion_missing}")
+print(f"Completion Year > {REFERENCE_YEAR} (-> off-plan, Property Age = NaN): {off_plan_count}")
+print(f"Total 'Property Age' missing:                             {df['Property Age'].isna().sum()}")
 print(f"\n'Property Age' range: {df['Property Age'].min()} - {df['Property Age'].max()}")
-print(f"'Is_Off_Plan' value counts:\n{df['Is_Off_Plan'].value_counts(dropna=False)}")
 print("\n" + "-"*60)
 
 print("\n--- Listed_Facility_Count (from Facilities) ---")
@@ -746,8 +736,17 @@ print("\n" + "-"*60)
 """
 --- Features tried in 3.8 and dropped (kept here as a record, not in df) ---
 
+Is_Off_Plan: 1 if Completion Year > REFERENCE_YEAR (still under construction
+at collection time), 0 if completed, NaN if Completion Year itself missing -
+tried so the off-plan signal wouldn't collapse into the same NaN as a
+genuinely unknown Completion Year. Dropped: only 22/3793 (0.6%) positive
+cases, and r=-0.0004, p=0.986 against price - not significant. The domain
+rationale (new-build premium) is still sound; the sample is simply too small
+to detect it either way, which is a different and stronger reason to drop
+than "correlation happened to be low" alone.
+
 Facilities_Recorded: a presence flag paired with Listed_Facility_Count,
-mirroring Property Age / Is_Off_Plan. Dropped after verifying
+mirroring the Is_Off_Plan idea above. Dropped after verifying
 Listed_Facility_Count == 0 for exactly the same 607 rows where Facilities is
 missing, with zero exceptions - no row has Facilities filled in yet produces
 a count of 0 after cleaning. The two carry identical information in this
@@ -996,9 +995,16 @@ State is included here too, not just Address - it's a two-step chain
 (Address -> State in 3.8, then State -> one-hot columns in 3.9), so State
 itself is just as superseded by State_Selangor/State_Penang/etc. as Property
 Type or Land Title are by their own encodings.
+
+Completion Year is dropped for a different, stronger reason than the others:
+verified Property Age == REFERENCE_YEAR - Completion Year exactly, for every
+non-off-plan row, with zero exceptions. This isn't approximate overlap like
+Total_Rooms - it's the same variable in different units, so keeping both
+would hand a linear model perfectly collinear inputs for no benefit.
 """
 cols_replaced_by_engineering = [
     'Address',
+    'Completion Year',
     'State',
     'Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station',
     'Tenure Type',
@@ -1020,6 +1026,318 @@ print(f"Shape after 3.7 drop:  {df.shape}")
 print(f"Columns dropped: {len(cols_no_engineering) + len(cols_replaced_by_engineering)}")
 print("\n" + "-"*60)
 
+print("\n--- Post-drop duplicate re-check ---")
+
+"""
+3.2 de-duplicated the original 32-column dataset, but that check can't see
+duplicates that only become identical once identifying columns (Ad List,
+Address, Building Name, description, etc.) are gone. Verified: dropping
+those 26 Stage A/B columns makes 67 groups of listings (136 rows) look
+row-identical on the remaining 50 columns.
+
+These rows are NOT removed - unlike the 3.2 exact duplicates (which really
+were the same scrape captured twice), these are genuinely different real
+listings (different Ad List, Address, description) that simply can't be
+told apart once the identifying columns are gone. Deleting them would throw
+away real observations for no data-quality reason.
+
+The actual risk is narrower: if one of these 67 groups gets split across the
+train/test split, the test set ends up containing a row the model already
+saw in training, silently inflating any evaluation metric. The fix belongs
+in 3.11 (a group-aware split, keeping every group on one side), not here -
+this matches the same principle already recorded for the Stage-3 near-
+duplicate relistings in notes_near_duplicate_relistings.md: "use a group-
+aware train/test split... this avoids leakage independent of the dedup
+decision."
+"""
+row_group_ids = df.groupby(list(df.columns), dropna=False).ngroup()
+group_sizes = row_group_ids.value_counts()
+print(f"Row-identical groups on the post-drop {df.shape[1]} columns: {(group_sizes > 1).sum()}")
+print(f"Rows involved in those groups:                                {(group_sizes[group_sizes > 1]).sum()}")
+print("Not removed - see docstring. Handled instead via a group-aware split in 3.11.")
+print("\n" + "-"*60)
+
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
 joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
+
+# ============================================================
+# 3.11 Train-Test Split
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.11: TRAIN-TEST SPLIT")
+print("="*60)
+
+print("\n--- Split ---")
+
+"""
+Split happens before any statistic-fitting step (imputation medians, scaler
+mean/std) - those must be computed from X_train only, so the split has to
+exist first. X and y are split in a single call, not two separate calls, so
+X_train/y_train are guaranteed to be the same rows (two separate calls risk
+misaligned rows even with the same random_state).
+
+Group-aware split (GroupShuffleSplit), not a plain train_test_split - 3.7's
+post-drop duplicate check found 67 groups of row-identical listings (136
+rows) that a plain random split could tear apart, landing some rows of the
+same group in train and others in test (test would then contain a row
+identical to one the model trained on, inflating evaluation metrics). Groups
+are 3793 IDs, one per unique row-content group - 3657 singleton groups (a
+listing with no row-identical twin) plus the 67 multi-row groups, so the
+80:20 ratio is barely affected in practice (each multi-row group only forces
+2-3 rows to move together, out of 3793).
+
+Regression target (price, continuous), not classification, so no stratify=.
+"""
+X = df.drop(columns=['price'])
+y = np.log(df['price'])
+
+gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+train_idx, test_idx = next(gss.split(X, y, groups=row_group_ids))
+
+X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+X_train = X_train.reset_index(drop=True)
+X_test = X_test.reset_index(drop=True)
+y_train = y_train.reset_index(drop=True)
+y_test = y_test.reset_index(drop=True)
+
+print(f"X_train: {X_train.shape} | y_train: {y_train.shape}")
+print(f"X_test:  {X_test.shape} | y_test:  {y_test.shape}")
+print(f"Actual test proportion: {len(X_test) / (len(X_train) + len(X_test)):.3f} (target was 0.2 - group constraint causes minor rounding)")
+assert len(X_train) == len(y_train)
+assert len(X_test) == len(y_test)
+
+print("\n--- Missing-value imputation (median + indicator, fit on X_train only) ---")
+
+"""
+These 5 columns still carry real NaN, deliberately left unfilled since 3.5
+specifically to avoid computing a statistic from the full dataset before the
+split existed. Each gets a missing-indicator flag before the median fill -
+same reasoning as Facilities_Recorded/Floor_Range_Known elsewhere in this
+pipeline: an imputed median and a genuinely-observed value are not the same
+information, and collapsing that distinction silently would hide it from the
+model. Floor_Range_Ordinal is excluded here - it already has that indicator
+(Floor_Range_Known, built in 3.9), so adding a second one would be redundant.
+
+The median itself comes from X_train.median() (skipna=True by default, so
+already-observed values compute it correctly), then the SAME value is used to
+fill X_test - X_test's own median is never touched, which is what avoids
+leaking test-set information into the imputation.
+"""
+X_train = X_train.copy()
+X_test = X_test.copy()
+
+IMPUTE_COLS = {
+    'Property Age': 'Property_Age_Missing',
+    '# of Floors': 'Num_Floors_Missing',
+    'Total Units': 'Total_Units_Missing',
+    'Parking Lot': 'Parking_Lot_Missing',
+    'Property Size': 'Property_Size_Missing',
+}
+
+for col, flag_col in IMPUTE_COLS.items():
+    X_train[flag_col] = X_train[col].isna().astype(int)
+    X_test[flag_col] = X_test[col].isna().astype(int)
+
+    train_median = X_train[col].median()
+    X_train[col] = X_train[col].fillna(train_median)
+    X_test[col] = X_test[col].fillna(train_median)
+
+    print(f"{col:15s} train median={train_median:>8.2f} | train missing={X_train[flag_col].sum():>4d} | test missing={X_test[flag_col].sum():>4d}")
+
+# Floor_Range_Ordinal: no new indicator (Floor_Range_Known already covers it), median fill only.
+floor_range_median = X_train['Floor_Range_Ordinal'].median()
+X_train['Floor_Range_Ordinal'] = X_train['Floor_Range_Ordinal'].fillna(floor_range_median)
+X_test['Floor_Range_Ordinal'] = X_test['Floor_Range_Ordinal'].fillna(floor_range_median)
+print(f"{'Floor_Range_Ordinal':15s} train median={floor_range_median:>8.2f} | (indicator already exists: Floor_Range_Known)")
+
+print(f"\nRemaining NaN in X_train: {X_train.isna().sum().sum()}")
+print(f"Remaining NaN in X_test:  {X_test.isna().sum().sum()}")
+assert X_train.isna().sum().sum() == 0
+assert X_test.isna().sum().sum() == 0
+
+X_train.to_csv(os.path.join(PROCESSED_DIR, "X_train.csv"), index=False)
+X_test.to_csv(os.path.join(PROCESSED_DIR, "X_test.csv"), index=False)
+y_train.to_csv(os.path.join(PROCESSED_DIR, "y_train.csv"), index=False)
+y_test.to_csv(os.path.join(PROCESSED_DIR, "y_test.csv"), index=False)
+joblib.dump((X_train, X_test, y_train, y_test), os.path.join(PROCESSED_DIR, "train_test_split.pkl"))
+print(f"\nSaved X_train/X_test/y_train/y_test to {PROCESSED_DIR}")
+
+# ============================================================
+# 3.10 Feature Scaling (executed after 3.11's split, using only X_train
+# to fit, so no test-set information leaks into the scaling statistics)
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.10: FEATURE SCALING")
+print("="*60)
+
+print("\n--- StandardScaler, fit on X_train only ---")
+
+"""
+StandardScaler (not MinMaxScaler) - this dataset has genuine extreme values
+(e.g. Total Units up to several thousand), and min-max scaling would let a
+single outlier compress the entire rest of the distribution into a tiny
+range. StandardScaler's mean/std are less distorted by a few extreme points.
+
+Only genuinely continuous/count numeric columns are scaled, plus
+Floor_Range_Ordinal - price is the target, not a feature, so it's excluded
+entirely. One-hot columns (State_*/PropertyType_*) and binary flags
+(Has_*/Is_Non_Bumi_Lot/Freehold Indicator/Floor_Range_Known/the imputation
+*_Missing flags) are left unscaled (already bounded 0/1, scaling a dummy
+isn't meaningful). Floor_Range_Ordinal is included in scaling, though it
+only has 3 levels - it has a real magnitude and order (1<2<3), not just
+presence/absence, so leaving it on a raw 1-3 scale while every other numeric
+feature is standardised to mean=0/std=1 would let it disproportionately
+dominate or shrink in a distance-based model (KNN/SVR) purely from a unit
+mismatch, unrelated to its actual importance.
+
+scaler.fit() is called on X_train ONLY, then the same fitted scaler
+transforms both X_train and X_test - X_test's own mean/std are never
+computed or used, which is what avoids leaking test-set information into
+the model's input scale.
+"""
+SCALE_COLS = ['Bedroom', 'Bathroom', 'Property Size', '# of Floors',
+              'Total Units', 'Parking Lot', 'Property Age', 'Listed_Facility_Count',
+              'Floor_Range_Ordinal']
+
+scaler = StandardScaler()
+X_train[SCALE_COLS] = scaler.fit_transform(X_train[SCALE_COLS])
+X_test[SCALE_COLS] = scaler.transform(X_test[SCALE_COLS])
+
+print(f"Columns scaled ({len(SCALE_COLS)}): {SCALE_COLS}")
+print(f"\nX_train[SCALE_COLS] post-scaling summary (mean should be ~0, std ~1):")
+print(X_train[SCALE_COLS].describe().loc[['mean', 'std']])
+print(f"\nX_test[SCALE_COLS] post-scaling summary (mean/std need NOT be exactly 0/1 -")
+print(f"it's transformed with X_train's scaler, not its own):")
+print(X_test[SCALE_COLS].describe().loc[['mean', 'std']])
+
+"""
+Saved under _scaled filenames, not overwriting 3.11's X_train.csv/X_test.csv -
+tree-based models (Decision Tree/Random Forest/Gradient Boosting) don't need
+scaling and can use 3.11's unscaled-but-imputed version directly, without
+having to invert this transform to get back the original values.
+"""
+X_train.to_csv(os.path.join(PROCESSED_DIR, "X_train_scaled.csv"), index=False)
+X_test.to_csv(os.path.join(PROCESSED_DIR, "X_test_scaled.csv"), index=False)
+joblib.dump((X_train, X_test, y_train, y_test), os.path.join(PROCESSED_DIR, "train_test_split_scaled.pkl"))
+joblib.dump(scaler, os.path.join(PROCESSED_DIR, "scaler.pkl"))
+print(f"\nSaved scaled X_train_scaled/X_test_scaled (3.11's unscaled X_train.csv/X_test.csv left untouched) to {PROCESSED_DIR}")
+
+# ============================================================
+# 3.12 Final Dataset Structure Summary
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.12: FINAL DATASET STRUCTURE SUMMARY")
+print("="*60)
+
+"""
+Every list below is derived from variables already in memory (RAW_COLUMNS,
+cols_no_engineering, cols_replaced_by_engineering, df.columns) rather than
+typed out by hand, so this section can't silently drift out of sync with
+what the pipeline actually did further up the script.
+"""
+retained_raw_cols = [c for c in RAW_COLUMNS if c in df.columns]
+dropped_cols = [c for c in RAW_COLUMNS if c not in df.columns]
+engineered_cols = [c for c in df.columns if c not in RAW_COLUMNS]
+
+print(f"\nFinal cleaned dataset (pre-split): {df.shape[0]} rows x {df.shape[1]} columns")
+print(f"X_train: {X_train.shape} | X_test: {X_test.shape}")
+
+print(f"\n--- Raw features retained as-is ({len(retained_raw_cols)}) ---")
+print(retained_raw_cols)
+
+print(f"\n--- Raw features dropped ({len(dropped_cols)}) ---")
+print(dropped_cols)
+
+print(f"\n--- Engineered/encoded features created ({len(engineered_cols)}) ---")
+print(engineered_cols)
+
+print(f"\n--- Missing value confirmation ---")
+print(f"Remaining NaN in X_train: {X_train.isna().sum().sum()}")
+print(f"Remaining NaN in X_test:  {X_test.isna().sum().sum()}")
+
+remaining_nan_df = df.isna().sum()
+remaining_nan_df = remaining_nan_df[remaining_nan_df > 0]
+if len(remaining_nan_df) == 0:
+    print("Remaining NaN in df (pre-split): 0")
+else:
+    print(f"Remaining NaN in df (pre-split): {remaining_nan_df.sum()} total, in {len(remaining_nan_df)} column(s):")
+    print(remaining_nan_df)
+    print("Explanation: these are the columns 3.11 imputes AFTER the train/test split")
+    print("(median fit on X_train only). df itself is left with real NaN on purpose,")
+    print("so EDA reads genuinely observed values, not a full-dataset statistic that")
+    print("would leak into what should be an X_train-only computation.")
+
+print("\n--- Summary table ---")
+
+"""
+Every value below is read from a variable already computed earlier in this
+script (RAW_COLUMNS/cols_no_engineering/cols_replaced_by_engineering/
+X_train/X_test/df), not re-typed by hand - so this table can't silently
+drift out of sync with what the pipeline actually did.
+
+"Row-identical groups" is intentionally NOT "remaining duplicate rows" -
+df.duplicated().sum() would report 69 here, which would misleadingly read as
+"a cleanup step that didn't finish." It's the opposite: these 136 rows
+(67 groups) are different real listings that were deliberately kept (not
+3.2's kind of duplicate - see the post-drop re-check above), with the actual
+train/test leakage risk handled by 3.11's group-aware split instead. This
+row reports the group count as evidence that risk was addressed, not as an
+outstanding cleanup item.
+"""
+_train_tagged = X_train.assign(price=y_train.values, _src='train')
+_test_tagged = X_test.assign(price=y_test.values, _src='test')
+_combined = pd.concat([_train_tagged, _test_tagged], ignore_index=True)
+_feature_cols = [c for c in _combined.columns if c != '_src']
+_cross_dup = _combined[_combined.duplicated(subset=_feature_cols, keep=False)]
+_sources_per_group = _cross_dup.groupby(_feature_cols, dropna=False)['_src'].apply(set)
+cross_split_leaked_groups = int((_sources_per_group.apply(len) > 1).sum())
+
+"""
+X_train/X_test have more columns than df's pre-split feature count (49) -
+3.11's imputation adds a *_Missing indicator flag per imputed column (5 of
+them: Property_Age_Missing, Num_Floors_Missing, Total_Units_Missing,
+Parking_Lot_Missing, Property_Size_Missing), which don't exist in df. Listed
+explicitly here (computed as a set difference, not hardcoded as "+5") so a
+reader comparing "49" against X_train.shape's "54" doesn't mistake the gap
+for an arithmetic error.
+"""
+indicator_cols_added = [c for c in X_train.columns if c not in df.drop(columns=['price']).columns]
+
+summary_table = pd.DataFrame({
+    "Item": [
+        "Final number of rows (pre-split df)",
+        "Final number of features (X, pre-split)",
+        "Numerical features",
+        "Non-numeric features remaining",
+        "Raw features retained as-is",
+        "Raw features dropped (Section 3.7)",
+        "Engineered/encoded features created (3.8+3.9)",
+        "Missing-value indicator flags added (Section 3.11)",
+        "Final number of features in X_train/X_test",
+        "Training set shape",
+        "Testing set shape",
+        "Remaining missing values (X_train + X_test)",
+        "Row-identical groups retained (not deleted - see 3.7 note)",
+        "Row-identical groups split across train/test (should be 0)",
+    ],
+    "Result": [
+        df.shape[0],
+        df.drop(columns=['price']).shape[1],
+        len(df.select_dtypes(include=['int64', 'float64']).columns),
+        len(df.select_dtypes(exclude=['int64', 'float64']).columns),
+        len(retained_raw_cols),
+        len(dropped_cols),
+        len(engineered_cols),
+        len(indicator_cols_added),
+        X_train.shape[1],
+        str(X_train.shape),
+        str(X_test.shape),
+        int(X_train.isna().sum().sum() + X_test.isna().sum().sum()),
+        int((row_group_ids.value_counts() > 1).sum()),
+        cross_split_leaked_groups,
+    ]
+})
+print(summary_table.to_string(index=False))
