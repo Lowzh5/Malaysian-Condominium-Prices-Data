@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 import seaborn as sns
 from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import train_test_split
 
 pd.set_option('display.max_columns', None)
 
@@ -580,9 +580,75 @@ print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 
 print(df.info())
 
+
 # ============================================================
-# 3.8 Feature Engineering (executed before 3.7 Feature Selection,
-# since several dropped columns are the source of engineered features below)
+# 3.11 Train-Test Split (moved ahead of 3.7/3.8/3.9 - executed
+# immediately after 3.6, before any feature engineering, encoding
+# or selection, so every fit-dependent step below can be fit on
+# X_train only and simply applied to X_test)
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.11: TRAIN-TEST SPLIT")
+print("="*60)
+
+print("\n--- Split ---")
+
+"""
+Split happens before feature engineering (3.8), categorical encoding (3.9)
+and feature selection (3.7) - not after, as in an earlier version of this
+pipeline - so every statistic-fitting step in those sections (rare-category
+merge thresholds, one-hot category lists, the Facilities vocabulary, the
+missing-value imputation medians, 3.10's scaler) can be fit on X_train only
+and applied to X_test, without having to specially reorder any one of them
+ahead of the split.
+
+Standard train_test_split (random_state=42), not a group-aware split -
+simpler than the GroupShuffleSplit approach used in an earlier version of
+this pipeline. See the known-limitation note below for the trade-off this
+accepts.
+
+X and y are split in a single call, not two separate calls, so X_train/
+y_train are guaranteed to be the same rows (two separate calls risk
+misaligned rows even with the same random_state).
+
+Regression target (price, continuous), not classification, so no stratify=.
+"""
+X = df.drop(columns=['price'])
+y = np.log(df['price'])
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+X_train = X_train.reset_index(drop=True)
+X_test = X_test.reset_index(drop=True)
+y_train = y_train.reset_index(drop=True)
+y_test = y_test.reset_index(drop=True)
+
+print(f"X_train: {X_train.shape} | y_train: {y_train.shape}")
+print(f"X_test:  {X_test.shape} | y_test:  {y_test.shape}")
+print(f"Actual test proportion: {len(X_test) / (len(X_train) + len(X_test)):.3f}")
+assert len(X_train) == len(y_train)
+assert len(X_test) == len(y_test)
+
+"""
+Known limitation: once identifier columns (Ad List, Address, description,
+Building Name, etc.) are dropped in 3.7 below, a handful of otherwise-
+distinct listings become row-identical on the remaining feature columns -
+different real properties that simply share every retained attribute. A
+group-aware split (GroupShuffleSplit) would keep every such group on one
+side of the split; the plain random split used here does not, so some of
+these groups may be torn across train/test, meaning a small number of test
+rows could be feature-identical to a training row. This is accepted here as
+a trade-off for pipeline simplicity, not an oversight - the actual count of
+groups affected is measured after feature selection/encoding and reported
+in 3.12's summary table ("Row-identical groups split across train/test").
+"""
+
+# ============================================================
+# 3.8 Feature Engineering (moved after 3.11's split - every rule
+# here is a fixed transformation with no data-dependent fitting,
+# so it is applied to X_train and X_test independently)
 # ============================================================
 print("\n" + "="*60)
 print("STEP 3.8: FEATURE ENGINEERING")
@@ -599,13 +665,18 @@ entirely (confirmed: all 152 addresses where the naive last-segment approach
 failed turned out to have the state one or more segments earlier, not
 missing). So every segment is checked, scanning from the end backwards, and
 matched against a fixed list of real Malaysian states - exact whole-segment
-equality, not substring search, so a place name that merely contains a state's
-name (e.g. "Kampung Melaka") is never mistaken for the state "Melaka".
+equality, not substring search, so a place name that merely contains a
+state's name (e.g. "Kampung Melaka") is never mistaken for the state
+"Melaka".
 
 Matching is case-insensitive (e.g. "SABAH", "putrajaya") - two rows in this
-dataset have a wrong-case state segment, currently masked only by a correctly-
-cased duplicate elsewhere in the same address; without case-insensitivity a
-future row with no such backup would be wrongly marked NaN.
+dataset have a wrong-case state segment, currently masked only by a
+correctly-cased duplicate elsewhere in the same address; without case-
+insensitivity a future row with no such backup would be wrongly marked NaN.
+
+This is a fixed rule with nothing fitted from data, so it's applied to
+X_train and X_test independently below - unlike the rare-category merge and
+one-hot encoding built from 'State' in 3.9, which must be fit on X_train only.
 """
 VALID_STATES = {'Selangor', 'Penang', 'Kuala Lumpur', 'Johor', 'Sabah', 'Sarawak',
                  'Perak', 'Kedah', 'Pahang', 'Negeri Sembilan', 'Melaka',
@@ -621,27 +692,6 @@ def extract_state_from_address(address):
             return VALID_STATES_LOWER[segment.lower()]
     return np.nan
 
-df['State'] = df['Address'].apply(extract_state_from_address)
-
-address_missing = df['Address'].isna().sum()
-no_state_in_any_segment = df['State'].isna().sum() - address_missing
-print(f"Address missing (-> State = NaN):                          {address_missing}")
-print(f"Address present, no segment matched a real state (-> NaN): {no_state_in_any_segment}")
-print(f"Total 'State' missing after extraction:                    {df['State'].isna().sum()}")
-
-"""
-Rare-category merge (states with fewer than 10 listings -> 'Other') and
-one-hot encoding are deferred to Part 3 of the pipeline, AFTER the train/test
-split - the <10 threshold is a statistic computed from data, so it must be
-fit on X_train only and then applied to X_test, the same leakage reasoning
-already used for Floor_Range_Ordinal's median fill. 'State' is kept here as
-plain extracted text; row_group_ids (built right after 3.7 below) is
-deliberately computed on this pre-merge, pre-encoding text value.
-"""
-print("\n--- 'State' value counts after extraction (rare-category merge + encoding deferred to Part 3, post-split) ---")
-print(df['State'].value_counts(dropna=False))
-print("\n" + "-"*60)
-
 print("\n--- Property Age (from Completion Year) ---")
 
 """
@@ -649,8 +699,9 @@ Property Age is computed against a fixed reference year, not whatever year
 the script happens to run in - Completion Year is a fixed fact about the
 property, and this dataset was collected in September 2023 (per the Kaggle
 source), so ages must be measured from then, not from today's calendar year.
-A dynamic "current year" would silently shift every Property Age value (and
-any report numbers built on it) further every year this script is re-run.
+A negative age (Completion Year after REFERENCE_YEAR) isn't invalid data -
+it means the unit was still under construction / sold off-plan at the time
+of collection, so Property Age is correctly left NaN for these rows.
 """
 REFERENCE_YEAR = 2023
 
@@ -659,24 +710,6 @@ def compute_property_age(completion_year):
         return np.nan
     age = REFERENCE_YEAR - completion_year
     return age if age >= 0 else np.nan
-
-df['Property Age'] = df['Completion Year'].apply(compute_property_age)
-
-"""
-A negative age (Completion Year after REFERENCE_YEAR) isn't invalid data - it
-means the unit was still under construction / sold off-plan at the time of
-collection, a normal, common scenario in Malaysian property listings. "Age"
-simply doesn't apply yet to an unbuilt property, so Property Age is correctly
-left NaN for these rows (Is_Off_Plan, which would have preserved that as its
-own signal, was tried and dropped - see the record further below).
-"""
-completion_missing = df['Completion Year'].isna().sum()
-off_plan_count = (df['Completion Year'] > REFERENCE_YEAR).sum()
-print(f"Completion Year missing (-> Property Age = NaN):          {completion_missing}")
-print(f"Completion Year > {REFERENCE_YEAR} (-> off-plan, Property Age = NaN): {off_plan_count}")
-print(f"Total 'Property Age' missing:                             {df['Property Age'].isna().sum()}")
-print(f"\n'Property Age' range: {df['Property Age'].min()} - {df['Property Age'].max()}")
-print("\n" + "-"*60)
 
 print("\n--- Listed_Facility_Count (from Facilities) ---")
 
@@ -691,141 +724,135 @@ def count_facilities(facilities_text):
     items = [item.strip() for item in facilities_text.split(',')]
     return len([item for item in items if item and not item.isdigit()])
 
-df['Listed_Facility_Count'] = df['Facilities'].apply(count_facilities)
-
-facilities_missing = df['Facilities'].isna().sum()
-print(f"Facilities missing (Listed_Facility_Count set to 0):    {facilities_missing}")
-print(f"\n'Listed_Facility_Count' range: {df['Listed_Facility_Count'].min()} - {df['Listed_Facility_Count'].max()}")
-print(df['Listed_Facility_Count'].describe())
-print("\n" + "-"*60)
-
 print("\n--- Has_X flags (from 'nearby amenity' text columns) ---")
 
 """
 Bus Stop / Mall / Park / School / Hospital / Highway / Railway Station each
-list a specific nearby amenity name as free text (e.g. "Mid Valley Megamall"),
-with missing rates between 76% and 96% (see notes_missing_value_decision_audit.md).
-The specific name has too little repeat structure to be usable directly, but
+list a specific nearby amenity name as free text, with missing rates
+between 76% and 96% (see notes_missing_value_decision_audit.md). The
+specific name has too little repeat structure to be usable directly, but
 whether the field was filled in at all is itself a signal. Converting to a
 presence flag also removes the missing-value problem entirely - every row
-gets 0 or 1, there is no NaN left over to defer to a later imputation step.
-Note this flag means "information was recorded", not "amenity confirmed
-absent" - a 0 does not prove there is no mall nearby, only that it wasn't written.
+gets 0 or 1. Note this flag means "information was recorded", not "amenity
+confirmed absent" - a 0 does not prove there is no mall nearby, only that it
+wasn't written.
 """
 NEARBY_COLUMNS = ['Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station']
 
-has_flag_log = []
-for col in NEARBY_COLUMNS:
-    flag_col = 'Has_' + col.replace(' ', '_')
-    df[flag_col] = df[col].notna().astype(int)
-    has_flag_log.append({
-        "Source column": col,
-        "New flag": flag_col,
-        "Missing in source (-> flag=0)": df[col].isna().sum(),
-        "Present in source (-> flag=1)": df[col].notna().sum(),
-    })
+def engineer_features(X, label):
+    X['State'] = X['Address'].apply(extract_state_from_address)
+    address_missing = X['Address'].isna().sum()
+    no_state_in_any_segment = X['State'].isna().sum() - address_missing
+    print(f"[{label}] Address missing (-> State=NaN): {address_missing} | "
+          f"no segment matched a state: {no_state_in_any_segment} | "
+          f"total State missing: {X['State'].isna().sum()}")
 
-has_flag_df = pd.DataFrame(has_flag_log)
-print(has_flag_df.to_string(index=False))
-print("\n" + "-"*60)
+    X['Property Age'] = X['Completion Year'].apply(compute_property_age)
+    completion_missing = X['Completion Year'].isna().sum()
+    off_plan_count = (X['Completion Year'] > REFERENCE_YEAR).sum()
+    print(f"[{label}] Completion Year missing (-> Property Age=NaN): {completion_missing} | "
+          f"off-plan (Completion Year > {REFERENCE_YEAR}): {off_plan_count} | "
+          f"Property Age missing: {X['Property Age'].isna().sum()}")
+
+    X['Listed_Facility_Count'] = X['Facilities'].apply(count_facilities)
+    print(f"[{label}] Facilities missing (-> Listed_Facility_Count=0): {X['Facilities'].isna().sum()} | "
+          f"Listed_Facility_Count range: {X['Listed_Facility_Count'].min()}-{X['Listed_Facility_Count'].max()}")
+
+    for col in NEARBY_COLUMNS:
+        flag_col = 'Has_' + col.replace(' ', '_')
+        X[flag_col] = X[col].notna().astype(int)
+    print(f"[{label}] Has_X flags created: {[('Has_' + c.replace(' ', '_')) for c in NEARBY_COLUMNS]}")
+
+    return X
+
+X_train = engineer_features(X_train, "X_train")
+X_test = engineer_features(X_test, "X_test")
 
 """
---- Features tried in 3.8 and dropped (kept here as a record, not in df) ---
+State's rare-category merge and one-hot encoding, and Property Type's
+rare-category merge and one-hot encoding, are both statistics computed from
+data (which categories are common enough to keep), so they are fit on
+X_train only and applied to X_test - see 3.9 below, not here. 'State' is
+kept here as plain extracted text for that reason.
+"""
+
+"""
+--- Features tried in 3.8 and dropped (kept here as a record, not in X) ---
 
 Is_Off_Plan: 1 if Completion Year > REFERENCE_YEAR (still under construction
 at collection time), 0 if completed, NaN if Completion Year itself missing -
 tried so the off-plan signal wouldn't collapse into the same NaN as a
 genuinely unknown Completion Year. Dropped: only 22/3793 (0.6%) positive
-cases, and r=-0.0004, p=0.986 against price - not significant. The domain
-rationale (new-build premium) is still sound; the sample is simply too small
-to detect it either way, which is a different and stronger reason to drop
-than "correlation happened to be low" alone.
+cases, and r=-0.0004, p=0.986 against price - not significant.
 
-Facilities_Recorded: a presence flag paired with Listed_Facility_Count,
-mirroring the Is_Off_Plan idea above. Dropped after verifying
-Listed_Facility_Count == 0 for exactly the same 607 rows where Facilities is
-missing, with zero exceptions - no row has Facilities filled in yet produces
-a count of 0 after cleaning. The two carry identical information in this
-dataset, so keeping both is pure redundancy.
+Facilities_Recorded: a presence flag paired with Listed_Facility_Count.
+Dropped after verifying Listed_Facility_Count == 0 for exactly the same 607
+rows where Facilities is missing, with zero exceptions - pure redundancy.
 
 Nearby_Amenity_Count: sum of the 7 Has_X flags into a single 0-7 score.
-Dropped for two reasons - it's a pure linear combination of columns already
-in df (the same redundancy problem as Total_Rooms = Bedroom + Bathroom), and
-it's empirically low-value too: r=-0.019, p=0.242 against price (n=3793),
-not statistically significant.
+Dropped - a pure linear combination of columns already in X, and
+empirically low-value too: r=-0.019, p=0.242 against price (n=3793), not
+statistically significant.
 
 Units per Floor: Total Units / # of Floors. Dropped because several rows
 produce physically impossible values (e.g. Ad List 100502825, Total
-Units=7810 / # of Floors=5 = 1562 units on one floor). Neither source column
-was flagged as invalid by their own individual range checks in 3.4/3.6 (each
-looks reasonable in isolation), so this cross-column ratio surfaced a data
-quality issue in Total Units / # of Floors that univariate outlier checks
-can't catch. Left out until that upstream issue is resolved with evidence.
+Units=7810 / # of Floors=5 = 1562 units on one floor). Left out until that
+upstream data quality issue is resolved with evidence.
 """
 
-df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
-joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
-print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
+print(f"\nX_train shape after 3.8: {X_train.shape} | X_test shape after 3.8: {X_test.shape}")
 
 # ============================================================
-# 3.9 Categorical Encoding
+# 3.9 Categorical Encoding (executed after 3.8, before 3.7's
+# drop - fixed-rule encodings are applied to X_train/X_test
+# independently; State and Property Type's rare-category merge
+# and one-hot encoding are fit on X_train only, then applied to
+# X_test, since the merge threshold is a statistic of the data)
 # ============================================================
 print("\n" + "="*60)
 print("STEP 3.9: CATEGORICAL ENCODING")
 print("="*60)
 
-"""
-State and Property Type one-hot encoding (including their rare-category
-merges) are deferred to Part 3 of the pipeline, after the train/test split -
-both merge thresholds (State <10, Property Type <20 listings) are statistics
-computed from data, so per the same leakage rule applied everywhere else in
-this pipeline (Floor_Range_Ordinal's median, the 3.11 imputation medians,
-3.10's scaler), they must be fit on X_train only and then applied to X_test.
-See Part 3 (after the 3.11 split) for both encodings.
-"""
-
 print("\n--- Land Title: rare-category merge, then binary encoding ---")
 
 """
-Land Title has 3 categories: Non Bumi Lot (3179), Bumi Lot (607), Malay
-Reserved (7). Malay Reserved is under 0.2% of records - the same sparse-
-category problem as Property Type's rare types. Merged into Bumi Lot rather
-than one-hot as its own column: both Bumi Lot and Malay Reserved represent
-land with restricted purchase eligibility (Bumiputera-only), in contrast to
-Non Bumi Lot's unrestricted eligibility - a real, not arbitrary, grouping.
+Land Title has 3 categories: Non Bumi Lot, Bumi Lot, Malay Reserved. Malay
+Reserved is under 0.2% of records - the same sparse-category problem as
+Property Type's rare types. Merged into Bumi Lot rather than one-hot as its
+own column: both Bumi Lot and Malay Reserved represent land with restricted
+purchase eligibility (Bumiputera-only), in contrast to Non Bumi Lot's
+unrestricted eligibility - a real, domain-based grouping rather than a
+statistic computed from data, so it's applied to X_train and X_test
+independently rather than fit on X_train only.
 
 That merge leaves only 2 categories, so a full one-hot would just produce a
-second column that's the exact logical negation of the first - a binary flag
-(same treatment as Tenure Type's Freehold/Leasehold) is more direct.
+second column that's the exact logical negation of the first - a binary
+flag is more direct.
 
-Uses .map() rather than a `== 'Non Bumi Lot'` comparison, for the same reason
-as Freehold Indicator - Land Title has 0 missing today, but `==` against NaN
-silently returns False (misclassified as Bumi Lot) instead of staying NaN, so
-this stays correct even if a future data pull or a reordered pipeline
-introduces missing values here.
+Uses .map() rather than a `== 'Non Bumi Lot'` comparison - `==` against NaN
+silently returns False (misclassified as Bumi Lot) instead of staying NaN.
 """
-df['Land Title'] = df['Land Title'].replace('Malay Reserved', 'Bumi Lot')
-print(f"'Land Title' counts after merging Malay Reserved into Bumi Lot:\n{df['Land Title'].value_counts()}")
-
-df['Is_Non_Bumi_Lot'] = df['Land Title'].map({'Non Bumi Lot': 1, 'Bumi Lot': 0})
-print(f"\n'Is_Non_Bumi_Lot' value counts:\n{df['Is_Non_Bumi_Lot'].value_counts()}")
+for _X, _label in [(X_train, "X_train"), (X_test, "X_test")]:
+    _X['Land Title'] = _X['Land Title'].replace('Malay Reserved', 'Bumi Lot')
+    _X['Is_Non_Bumi_Lot'] = _X['Land Title'].map({'Non Bumi Lot': 1, 'Bumi Lot': 0})
+    print(f"[{_label}] 'Is_Non_Bumi_Lot' value counts:\n{_X['Is_Non_Bumi_Lot'].value_counts(dropna=False)}")
 print("\n" + "-"*60)
 
 print("\n--- Tenure Type: binary encoding ---")
 
 """
-Only 2 categories (Freehold 2311, Leasehold 1482, 0 missing) - a full one-hot
-would produce a second column that's the exact logical negation of the
-first (the "dummy variable trap"), so a single binary indicator carries the
-same information with one fewer redundant column.
+Only 2 categories (Freehold / Leasehold, 0 missing) - a full one-hot would
+produce a second column that's the exact logical negation of the first (the
+"dummy variable trap"), so a single binary indicator carries the same
+information with one fewer redundant column. Fixed rule, applied to
+X_train/X_test independently.
 
-Uses .map() rather than a `== 'Freehold'` comparison - `==` against NaN
-silently returns False, which would misclassify a genuinely unknown tenure
-type as Leasehold/0 rather than leaving it NaN. .map() preserves NaN as NaN
-if this column ever does have missing values in a future data pull.
+Uses .map() rather than a `== 'Freehold'` comparison, for the same
+NaN-safety reason as Land Title above.
 """
-df['Freehold Indicator'] = df['Tenure Type'].map({'Freehold': 1, 'Leasehold': 0})
-print(f"'Freehold Indicator' value counts:\n{df['Freehold Indicator'].value_counts(dropna=False)}")
+for _X, _label in [(X_train, "X_train"), (X_test, "X_test")]:
+    _X['Freehold Indicator'] = _X['Tenure Type'].map({'Freehold': 1, 'Leasehold': 0})
+    print(f"[{_label}] 'Freehold Indicator' value counts:\n{_X['Freehold Indicator'].value_counts(dropna=False)}")
 print("\n" + "-"*60)
 
 print("\n--- Floor Range: ordinal encoding ---")
@@ -834,45 +861,37 @@ print("\n--- Floor Range: ordinal encoding ---")
 Low/Medium/High have a real order (higher floor is a meaningfully different
 attribute, not an arbitrary label), so ordinal encoding preserves that
 monotonic relationship instead of discarding it into unordered one-hot
-columns. "Unknown" (filled in back in 3.5) doesn't fit that order, so it maps
-to NaN here rather than being forced into a fake rank.
+columns. "Unknown" (filled in back in 3.5) doesn't fit that order, so it
+maps to NaN here rather than being forced into a fake rank. Fixed mapping
+rule, applied to X_train/X_test independently.
 
-Floor_Range_Known keeps the Unknown/observed distinction visible as its own
-signal, the same pairing already used for Property Age/Is_Off_Plan.
-
-Filling Floor_Range_Ordinal's NaN (with the train-set median) is deliberately
-NOT done here - it happens in 3.11, after the train/test split, using only
-X_train's median, for the same leakage reason Completion Year / # of Floors /
-Total Units / Parking Lot's imputation is deferred there. Left as real NaN
-for now so 3.9's output isn't quietly contaminated by a full-dataset statistic.
-
-Floor_Range_Known uses .map() rather than `!= 'Unknown'` - Floor Range has 0
-missing today (filled with the string "Unknown" back in 3.5), but a `!=`
-comparison would silently treat a future genuine NaN as "known" (1) instead
-of leaving it NaN, if this step is ever reordered to run before 3.5's fill.
+Filling Floor_Range_Ordinal's NaN is deliberately NOT done here - it happens
+in the imputation step below, using only X_train's median, for the same
+leakage reason the other numeric imputations are deferred there.
 """
-df['Floor_Range_Ordinal'] = df['Floor Range'].map({'Low': 1, 'Medium': 2, 'High': 3})
-df['Floor_Range_Known'] = df['Floor Range'].map(lambda x: np.nan if pd.isna(x) else int(x != 'Unknown'))
-
-print(f"'Floor_Range_Ordinal' value counts (NaN = Unknown, imputed later in 3.11):\n{df['Floor_Range_Ordinal'].value_counts(dropna=False)}")
-print(f"\n'Floor_Range_Known' value counts:\n{df['Floor_Range_Known'].value_counts()}")
+for _X, _label in [(X_train, "X_train"), (X_test, "X_test")]:
+    _X['Floor_Range_Ordinal'] = _X['Floor Range'].map({'Low': 1, 'Medium': 2, 'High': 3})
+    print(f"[{_label}] 'Floor_Range_Ordinal' value counts (NaN=Unknown, imputed later):\n"
+          f"{_X['Floor_Range_Ordinal'].value_counts(dropna=False)}")
 print("\n" + "-"*60)
 
-print("\n--- Facilities: text cleanup + multi-hot encoding ---")
+print("\n--- Facilities: text cleanup + multi-hot encoding (vocabulary fit on X_train only) ---")
 
 """
-Cleanup pipeline, applied before binarising: split on comma, strip whitespace,
-title-case for consistency, drop purely numeric junk (the same "10" artefact
-filtered in Listed_Facility_Count's Ad List 95706905).
+Cleanup pipeline, applied before binarising: split on comma, strip
+whitespace, title-case for consistency, drop purely numeric junk (the same
+"10" scraping artefact filtered in Listed_Facility_Count's Ad List
+95706905).
 
-"Merge near-duplicate wording" (e.g. "Badminton" vs "Badminton Court") was
-planned but turns out to have nothing to merge: the full vocabulary across
-all 3793 rows was checked earlier and is exactly 14 distinct, non-overlapping
-facility names (Parking, Security, Playground, Swimming Pool, Lift,
-Gymnasium, Minimart, Barbeque area, Jogging Track, Multipurpose hall, Sauna,
-Tennis Court, Club house, Squash Court) plus the one junk "10" - no synonyms,
-no case variants. The merge step is a no-op here, kept in the pipeline in
-case a future data pull introduces messier wording.
+The full facility vocabulary is fixed (14 distinct names, verified earlier
+across the whole dataset, no synonyms/case variants), so it does not
+normally differ between X_train and X_test - but it is still, technically, a
+statistic read off the data, so it's fit (learned) on X_train's facility
+lists only via MultiLabelBinarizer. X_test is then built by reindexing
+against exactly the columns X_train produced: any facility name seen only in
+X_test (not seen in X_train) is silently ignored rather than creating a new
+column - same reindex-and-fill-0 pattern used for State/Property Type's
+one-hot below.
 """
 def clean_facility_list(facilities_text):
     if pd.isna(facilities_text):
@@ -880,197 +899,34 @@ def clean_facility_list(facilities_text):
     items = [item.strip().title() for item in facilities_text.split(',')]
     return [item for item in items if item and not item.isdigit()]
 
-facility_lists = df['Facilities'].apply(clean_facility_list)
+train_facility_lists = X_train['Facilities'].apply(clean_facility_list)
+test_facility_lists = X_test['Facilities'].apply(clean_facility_list)
 
 mlb = MultiLabelBinarizer()
-facility_encoded = pd.DataFrame(
-    mlb.fit_transform(facility_lists),
+facility_encoded_train = pd.DataFrame(
+    mlb.fit_transform(train_facility_lists),
     columns=['Has_' + c.replace(' ', '_') for c in mlb.classes_],
-    index=df.index
-).astype(int)  # MultiLabelBinarizer already outputs int64, but made explicit rather than relied on
-df = pd.concat([df, facility_encoded], axis=1)
+    index=X_train.index
+).astype(int)
 
-print(f"Distinct facility types found: {len(mlb.classes_)}")
-print(f"Columns created: {list(facility_encoded.columns)}")
-print(f"\nColumn totals:\n{facility_encoded.sum().sort_values(ascending=False)}")
+facility_encoded_test = pd.DataFrame(0, index=X_test.index, columns=facility_encoded_train.columns)
+unseen_test_facilities = set()
+for idx, items in zip(X_test.index, test_facility_lists):
+    for item in items:
+        col = 'Has_' + item.replace(' ', '_')
+        if col in facility_encoded_test.columns:
+            facility_encoded_test.loc[idx, col] = 1
+        else:
+            unseen_test_facilities.add(item)
+
+X_train = pd.concat([X_train, facility_encoded_train], axis=1)
+X_test = pd.concat([X_test, facility_encoded_test], axis=1)
+
+print(f"Distinct facility types found in X_train: {len(mlb.classes_)}")
+print(f"Columns created: {list(facility_encoded_train.columns)}")
+print(f"Facility names seen in X_test but not X_train (dropped, not encoded): {unseen_test_facilities or 'none'}")
+print(f"\nX_train column totals:\n{facility_encoded_train.sum().sort_values(ascending=False)}")
 print("\n" + "-"*60)
-
-df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
-joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
-print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
-
-# ============================================================
-# 3.7 Feature Selection (executed after 3.8/3.9, since it drops
-# columns that 3.8/3.9 needed to still exist while extracting from them)
-# ============================================================
-print("\n" + "="*60)
-print("STEP 3.7: FEATURE SELECTION")
-print("="*60)
-
-print("\n--- Stage A: columns with no predictive value, unrelated to any 3.8/3.9 engineering ---")
-
-"""
-These were never going to be used, encoded or otherwise - dropped purely on
-their own merits (unstructured text, unique identifier, zero variance, agent/
-listing-firm metadata unrelated to the property, or high cardinality with no
-extractable pattern), independent of anything built in 3.8/3.9.
-"""
-cols_no_engineering = [
-    'description', 'Ad List',
-    'Nearby School', 'Nearby Mall', 'Nearby Railway Station',
-    'Category',
-    'Firm Type', 'Firm Number', 'REN Number',
-    'Building Name', 'Developer',
-]
-
-print("Non-null counts before drop:")
-for c in cols_no_engineering:
-    print(f"  {c:25s} {df[c].notna().sum()} non-null")
-
-print("\n--- Stage B: raw columns already superseded by a 3.8/3.9 engineered feature ---")
-
-"""
-Each of these was kept alive specifically so 3.8/3.9 could extract from it
-(Has_X flags from the 7 nearby-amenity columns, Freehold Indicator from
-Tenure Type, Is_Non_Bumi_Lot from Land Title, Floor_Range_Ordinal/Known from
-Floor Range, multi-hot from Facilities). Now that every extraction is done,
-the raw source column is redundant with its own derived feature(s) already
-in df.
-
-State and Property Type are deliberately NOT dropped here, unlike the other
-engineered-from columns. Their rare-category merge + one-hot encoding is
-fit-dependent (the merge threshold is a statistic of the data) and is
-deferred to Part 3, after the 3.11 split, so both raw text columns have to
-stay alive in df past this point - they're dropped later, from X_train/
-X_test individually, right after that encoding runs.
-
-Completion Year is dropped for a different, stronger reason than the others:
-verified Property Age == REFERENCE_YEAR - Completion Year exactly, for every
-non-off-plan row, with zero exceptions. This isn't approximate overlap like
-Total_Rooms - it's the same variable in different units, so keeping both
-would hand a linear model perfectly collinear inputs for no benefit.
-"""
-cols_replaced_by_engineering = [
-    'Address',
-    'Completion Year',
-    'Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station',
-    'Tenure Type',
-    'Land Title',
-    'Floor Range',
-    'Facilities',
-]
-
-print("Non-null counts before drop:")
-for c in cols_replaced_by_engineering:
-    print(f"  {c:25s} {df[c].notna().sum()} non-null")
-
-shape_before_drop = df.shape
-df = df.drop(columns=cols_no_engineering + cols_replaced_by_engineering)
-
-print(f"\nShape before 3.7 drop: {shape_before_drop}")
-print(f"Shape after 3.7 drop:  {df.shape}")
-print(f"Columns dropped: {len(cols_no_engineering) + len(cols_replaced_by_engineering)}")
-print("\n" + "-"*60)
-
-print("\n--- Post-drop duplicate re-check ---")
-
-"""
-3.2 de-duplicated the original 32-column dataset, but that check can't see
-duplicates that only become identical once identifying columns (Ad List,
-Address, Building Name, description, etc.) are gone. Computed fresh below on
-whatever df looks like after this section's Stage A/B drop - counts are
-printed dynamically rather than hardcoded, since the column set dropped here
-(24 columns; State and Property Type are deliberately kept, see Stage B's
-docstring above) differs from earlier pipeline iterations.
-
-These rows are NOT removed - unlike the 3.2 exact duplicates (which really
-were the same scrape captured twice), these are genuinely different real
-listings (different Ad List, Address, description) that simply can't be
-told apart once the identifying columns are gone. Deleting them would throw
-away real observations for no data-quality reason.
-
-The actual risk is narrower: if one of these groups gets split across the
-train/test split, the test set ends up containing a row the model already
-saw in training, silently inflating any evaluation metric. The fix belongs
-in 3.11 (a group-aware split, keeping every group on one side), not here -
-this matches the same principle already recorded for the Stage-3 near-
-duplicate relistings in notes_near_duplicate_relistings.md: "use a group-
-aware train/test split... this avoids leakage independent of the dedup
-decision."
-
-row_group_ids is computed HERE, right after this section's drop, and BEFORE
-State/Property Type are merged/encoded in Part 3 - grouping on the still-raw,
-unmerged text values gives the same group structure as grouping after the
-merge would (verified: rare-category merging only collapses distinct labels
-within a column into 'Other', it never changes which rows already agreed or
-disagreed with each other on that column), so there is no need to wait for
-Part 3 to compute this.
-"""
-row_group_ids = df.groupby(list(df.columns), dropna=False).ngroup()
-group_sizes = row_group_ids.value_counts()
-print(f"Row-identical groups on the post-drop {df.shape[1]} columns: {(group_sizes > 1).sum()}")
-print(f"Rows involved in those groups:                                {(group_sizes[group_sizes > 1]).sum()}")
-print("Not removed - see docstring. Handled instead via a group-aware split in 3.11.")
-print("\n" + "-"*60)
-
-df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
-joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
-print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
-
-# ============================================================
-# 3.11 Train-Test Split
-# ============================================================
-print("\n" + "="*60)
-print("STEP 3.11: TRAIN-TEST SPLIT")
-print("="*60)
-
-print("\n--- Split ---")
-
-"""
-Split happens before any statistic-fitting step (imputation medians, scaler
-mean/std) - those must be computed from X_train only, so the split has to
-exist first. X and y are split in a single call, not two separate calls, so
-X_train/y_train are guaranteed to be the same rows (two separate calls risk
-misaligned rows even with the same random_state).
-
-Group-aware split (GroupShuffleSplit), not a plain train_test_split - 3.7's
-post-drop duplicate check (printed above) found a handful of groups of
-row-identical listings that a plain random split could tear apart, landing
-some rows of the same group in train and others in test (test would then
-contain a row identical to one the model trained on, inflating evaluation
-metrics). row_group_ids has one ID per unique row-content group - mostly
-singleton groups (a listing with no row-identical twin) plus the small
-number of multi-row groups reported above, so the 80:20 ratio is barely
-affected in practice (each multi-row group only forces a couple of rows to
-move together, out of thousands).
-
-Regression target (price, continuous), not classification, so no stratify=.
-"""
-X = df.drop(columns=['price'])
-y = np.log(df['price'])
-
-gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-train_idx, test_idx = next(gss.split(X, y, groups=row_group_ids))
-
-X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-X_train = X_train.reset_index(drop=True)
-X_test = X_test.reset_index(drop=True)
-y_train = y_train.reset_index(drop=True)
-y_test = y_test.reset_index(drop=True)
-
-print(f"X_train: {X_train.shape} | y_train: {y_train.shape}")
-print(f"X_test:  {X_test.shape} | y_test:  {y_test.shape}")
-print(f"Actual test proportion: {len(X_test) / (len(X_train) + len(X_test)):.3f} (target was 0.2 - group constraint causes minor rounding)")
-assert len(X_train) == len(y_train)
-assert len(X_test) == len(y_test)
-
-# ============================================================
-# Part 3 - statistic-fitting steps (fit on X_train only, applied to X_test)
-# ============================================================
-X_train = X_train.copy()
-X_test = X_test.copy()
 
 print("\n--- State: rare-category merge + one-hot encoding (fit on X_train only) ---")
 
@@ -1088,8 +944,8 @@ fitted statistic, so it's safe to apply to X_train and X_test independently.
 The <10-listings rare-category threshold IS a fitted statistic (unlike the
 fill above, it depends on which categories are common enough to keep), so
 it's computed from X_train's value_counts() ONLY, then the same rare-category
-list is applied to X_test's State column - the same leakage rule already
-used for the 3.11 imputation medians and 3.10's scaler.
+list is applied to X_test's State column - the same leakage rule used for
+the imputation medians below and 3.10's scaler.
 
 X_test's State is cast to a Categorical using X_train's post-merge category
 list (not encoded independently) - this guarantees get_dummies drops the
@@ -1139,8 +995,7 @@ Same fit-on-X_train-only reasoning as State above, with a <20-listings
 threshold. Property Type has no missing values (unlike State), so no
 "Unknown" fill is needed first. Duplex / Townhouse Condo / Studio / Others
 each have fewer than 20 listings out of 3793 - one-hot on these individually
-would produce columns that are almost entirely 0, and the group-aware split
-could easily leave one of them with zero rows in X_train.
+would produce columns that are almost entirely 0.
 """
 RARE_PROPERTY_TYPE_THRESHOLD = 20
 train_property_type_counts = X_train['Property Type'].value_counts()
@@ -1169,37 +1024,121 @@ print(f"\n'Property Type' counts in X_train after merge:\n{X_train['Property Typ
 print(f"\nOne-hot columns created ({len(property_type_dummies_train.columns)}): {list(property_type_dummies_train.columns)}")
 print("\n" + "-"*60)
 
-print("\n--- Dropping raw State / Property Type text columns (superseded by the one-hot columns above) ---")
-X_train = X_train.drop(columns=['State', 'Property Type'])
-X_test = X_test.drop(columns=['State', 'Property Type'])
+print(f"\nX_train shape after 3.9: {X_train.shape} | X_test shape after 3.9: {X_test.shape}")
+
+# ============================================================
+# 3.7 Feature Selection (executed after 3.8/3.9, since it drops
+# columns that 3.8/3.9 needed to still exist while extracting
+# from them - applied to X_train/X_test independently using the
+# same fixed column lists on each side)
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.7: FEATURE SELECTION")
+print("="*60)
+
+print("\n--- Stage A: columns with no predictive value, unrelated to any 3.8/3.9 engineering ---")
+
+"""
+These were never going to be used, encoded or otherwise - dropped purely on
+their own merits (unstructured text, unique identifier, zero variance,
+agent/listing-firm metadata unrelated to the property, or high cardinality
+with no extractable pattern), independent of anything built in 3.8/3.9.
+"""
+cols_no_engineering = [
+    'description', 'Ad List',
+    'Nearby School', 'Nearby Mall', 'Nearby Railway Station',
+    'Category',
+    'Firm Type', 'Firm Number', 'REN Number',
+    'Building Name', 'Developer',
+]
+
+print("Non-null counts before drop (X_train):")
+for c in cols_no_engineering:
+    print(f"  {c:25s} {X_train[c].notna().sum()} non-null")
+
+print("\n--- Stage B: raw columns already superseded by a 3.8/3.9 engineered feature ---")
+
+"""
+Each of these was kept alive specifically so 3.8/3.9 could extract from it
+(Has_X flags from the 7 nearby-amenity columns, Freehold Indicator from
+Tenure Type, Is_Non_Bumi_Lot from Land Title, Floor_Range_Ordinal from
+Floor Range, multi-hot from Facilities, one-hot from State/Property Type -
+both fit on X_train and applied to X_test already, in 3.9 above). Now that
+every extraction/encoding is done, the raw source column is redundant with
+its own derived feature(s) already in X.
+
+Completion Year is dropped for a different, stronger reason than the
+others: verified Property Age == REFERENCE_YEAR - Completion Year exactly,
+for every non-off-plan row, with zero exceptions. This isn't approximate
+overlap - it's the same variable in different units, so keeping both would
+hand a linear model perfectly collinear inputs for no benefit.
+"""
+cols_replaced_by_engineering = [
+    'Address',
+    'Completion Year',
+    'Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station',
+    'Tenure Type',
+    'Land Title',
+    'Floor Range',
+    'Facilities',
+    'State',
+    'Property Type',
+]
+
+print("Non-null counts before drop (X_train):")
+for c in cols_replaced_by_engineering:
+    print(f"  {c:25s} {X_train[c].notna().sum()} non-null")
+
+shape_before_drop_train = X_train.shape
+shape_before_drop_test = X_test.shape
+X_train = X_train.drop(columns=cols_no_engineering + cols_replaced_by_engineering)
+X_test = X_test.drop(columns=cols_no_engineering + cols_replaced_by_engineering)
+
+print(f"\nX_train shape before 3.7 drop: {shape_before_drop_train} -> after: {X_train.shape}")
+print(f"X_test shape before 3.7 drop:  {shape_before_drop_test} -> after: {X_test.shape}")
+print(f"Columns dropped: {len(cols_no_engineering) + len(cols_replaced_by_engineering)}")
 print("\n" + "-"*60)
 
-print("\n--- Missing-value imputation (median + indicator, fit on X_train only) ---")
+# ============================================================
+# Missing-value imputation (median fill, fit on X_train only and
+# applied to X_test - executed after 3.7's drop)
+# ============================================================
+print("\n" + "="*60)
+print("MISSING-VALUE IMPUTATION")
+print("="*60)
 
 """
-These 5 columns still carry real NaN, deliberately left unfilled since 3.5
-specifically to avoid computing a statistic from the full dataset before the
-split existed. Each gets a missing-indicator flag before the median fill -
-same reasoning as Facilities_Recorded/Floor_Range_Known elsewhere in this
-pipeline: an imputed median and a genuinely-observed value are not the same
-information, and collapsing that distinction silently would hide it from the
-model. Floor_Range_Ordinal is excluded here - it already has that indicator
-(Floor_Range_Known, built in 3.9), so adding a second one would be redundant.
-
-The median itself comes from X_train.median() (skipna=True by default, so
-already-observed values compute it correctly), then the SAME value is used to
-fill X_test - X_test's own median is never touched, which is what avoids
+These columns still carry real NaN, deliberately left unfilled since 3.5 /
+3.8's Property Age computation, since imputing before the split existed
+would compute a statistic from data the model shouldn't have seen yet. The
+median itself comes from X_train.median() (skipna=True by default, so
+already-observed values compute it correctly), then the SAME value is used
+to fill X_test - X_test's own median is never touched, which is what avoids
 leaking test-set information into the imputation.
+
+Property Age / # of Floors / Total Units / Parking Lot each get a
+missing-indicator flag before the median fill - regression testing (R² and
+a t-test on each flag's coefficient) confirmed missingness itself is
+statistically significant against price for all four (p < 1e-16), so an
+imputed median and a genuinely-observed value are NOT the same information
+here, and collapsing that distinction would hide a real signal from the
+model.
+
+Property Size is excluded from flagging - it has only 1 missing value in
+the raw data, too small a sample for the flag's coefficient to support any
+meaningful statistical inference (same reasoning already used in 3.8 to
+drop Is_Off_Plan for having too few positive cases). Floor_Range_Ordinal is
+likewise median-filled only, with no flag added.
 """
-IMPUTE_COLS = {
+IMPUTE_FLAG_COLS = {
     'Property Age': 'Property_Age_Missing',
     '# of Floors': 'Num_Floors_Missing',
     'Total Units': 'Total_Units_Missing',
     'Parking Lot': 'Parking_Lot_Missing',
-    'Property Size': 'Property_Size_Missing',
 }
+IMPUTE_NO_FLAG_COLS = ['Property Size', 'Floor_Range_Ordinal']
 
-for col, flag_col in IMPUTE_COLS.items():
+for col, flag_col in IMPUTE_FLAG_COLS.items():
     X_train[flag_col] = X_train[col].isna().astype(int)
     X_test[flag_col] = X_test[col].isna().astype(int)
 
@@ -1207,13 +1146,17 @@ for col, flag_col in IMPUTE_COLS.items():
     X_train[col] = X_train[col].fillna(train_median)
     X_test[col] = X_test[col].fillna(train_median)
 
-    print(f"{col:15s} train median={train_median:>8.2f} | train missing={X_train[flag_col].sum():>4d} | test missing={X_test[flag_col].sum():>4d}")
+    print(f"{col:20s} train median={train_median:>8.2f} | train missing={X_train[flag_col].sum():>4d} | test missing={X_test[flag_col].sum():>4d} | flag={flag_col}")
 
-# Floor_Range_Ordinal: no new indicator (Floor_Range_Known already covers it), median fill only.
-floor_range_median = X_train['Floor_Range_Ordinal'].median()
-X_train['Floor_Range_Ordinal'] = X_train['Floor_Range_Ordinal'].fillna(floor_range_median)
-X_test['Floor_Range_Ordinal'] = X_test['Floor_Range_Ordinal'].fillna(floor_range_median)
-print(f"{'Floor_Range_Ordinal':15s} train median={floor_range_median:>8.2f} | (indicator already exists: Floor_Range_Known)")
+for col in IMPUTE_NO_FLAG_COLS:
+    train_missing = X_train[col].isna().sum()
+    test_missing = X_test[col].isna().sum()
+
+    train_median = X_train[col].median()
+    X_train[col] = X_train[col].fillna(train_median)
+    X_test[col] = X_test[col].fillna(train_median)
+
+    print(f"{col:20s} train median={train_median:>8.2f} | train missing={train_missing:>4d} | test missing={test_missing:>4d} | no flag")
 
 print(f"\nRemaining NaN in X_train: {X_train.isna().sum().sum()}")
 print(f"Remaining NaN in X_test:  {X_test.isna().sum().sum()}")
@@ -1228,8 +1171,9 @@ joblib.dump((X_train, X_test, y_train, y_test), os.path.join(PROCESSED_DIR, "tra
 print(f"\nSaved X_train/X_test/y_train/y_test to {PROCESSED_DIR}")
 
 # ============================================================
-# 3.10 Feature Scaling (executed after 3.11's split, using only X_train
-# to fit, so no test-set information leaks into the scaling statistics)
+# 3.10 Feature Scaling (executed after imputation, using only
+# X_train to fit, so no test-set information leaks into the
+# scaling statistics)
 # ============================================================
 print("\n" + "="*60)
 print("STEP 3.10: FEATURE SCALING")
@@ -1246,9 +1190,9 @@ range. StandardScaler's mean/std are less distorted by a few extreme points.
 Only genuinely continuous/count numeric columns are scaled, plus
 Floor_Range_Ordinal - price is the target, not a feature, so it's excluded
 entirely. One-hot columns (State_*/PropertyType_*) and binary flags
-(Has_*/Is_Non_Bumi_Lot/Freehold Indicator/Floor_Range_Known/the imputation
-*_Missing flags) are left unscaled (already bounded 0/1, scaling a dummy
-isn't meaningful). Floor_Range_Ordinal is included in scaling, though it
+(Has_*/Is_Non_Bumi_Lot/Freehold Indicator/the imputation *_Missing flags)
+are left unscaled (already bounded 0/1, scaling a dummy isn't meaningful).
+Floor_Range_Ordinal is included in scaling, though it
 only has 3 levels - it has a real magnitude and order (1<2<3), not just
 presence/absence, so leaving it on a raw 1-3 scale while every other numeric
 feature is standardised to mean=0/std=1 would let it disproportionately
@@ -1276,16 +1220,17 @@ print(f"it's transformed with X_train's scaler, not its own):")
 print(X_test[SCALE_COLS].describe().loc[['mean', 'std']])
 
 """
-Saved under _scaled filenames, not overwriting 3.11's X_train.csv/X_test.csv -
-tree-based models (Decision Tree/Random Forest/Gradient Boosting) don't need
-scaling and can use 3.11's unscaled-but-imputed version directly, without
-having to invert this transform to get back the original values.
+Saved under _scaled filenames, not overwriting the imputation step's
+X_train.csv/X_test.csv - tree-based models (Decision Tree/Random Forest/
+Gradient Boosting) don't need scaling and can use that unscaled-but-imputed
+version directly, without having to invert this transform to get back the
+original values.
 """
 X_train.to_csv(os.path.join(PROCESSED_DIR, "X_train_scaled.csv"), index=False)
 X_test.to_csv(os.path.join(PROCESSED_DIR, "X_test_scaled.csv"), index=False)
 joblib.dump((X_train, X_test, y_train, y_test), os.path.join(PROCESSED_DIR, "train_test_split_scaled.pkl"))
 joblib.dump(scaler, os.path.join(PROCESSED_DIR, "scaler.pkl"))
-print(f"\nSaved scaled X_train_scaled/X_test_scaled (3.11's unscaled X_train.csv/X_test.csv left untouched) to {PROCESSED_DIR}")
+print(f"\nSaved scaled X_train_scaled/X_test_scaled (unscaled X_train.csv/X_test.csv left untouched) to {PROCESSED_DIR}")
 
 # ============================================================
 # 3.12 Final Dataset Structure Summary
@@ -1295,59 +1240,46 @@ print("STEP 3.12: FINAL DATASET STRUCTURE SUMMARY")
 print("="*60)
 
 """
-Every list below is derived from variables already in memory (RAW_COLUMNS,
-cols_no_engineering, cols_replaced_by_engineering, df.columns) rather than
-typed out by hand, so this section can't silently drift out of sync with
-what the pipeline actually did further up the script.
+Feature engineering (3.8), encoding (3.9) and selection (3.7) now run on
+X_train/X_test after the split, not on `df` beforehand, so `df` only
+reflects the cleaned dataset through 3.6 (pre-engineering, still including
+'price' and every raw column). The "final" feature set this summary
+describes is therefore read from X_train's columns, not df's - and
+cols_no_engineering / cols_replaced_by_engineering (built in 3.7 above) are
+reused rather than retyped, so this can't silently drift out of sync with
+what the pipeline actually dropped.
 """
-retained_raw_cols = [c for c in RAW_COLUMNS if c in df.columns]
-dropped_cols = [c for c in RAW_COLUMNS if c not in df.columns]
-engineered_cols = [c for c in df.columns if c not in RAW_COLUMNS]
+dropped_cols = cols_no_engineering + cols_replaced_by_engineering
+retained_raw_cols = [c for c in RAW_COLUMNS if c in X_train.columns]
+engineered_cols = [c for c in X_train.columns if c not in RAW_COLUMNS]
 
-print(f"\nFinal cleaned dataset (pre-split): {df.shape[0]} rows x {df.shape[1]} columns")
+print(f"\nCleaned dataset entering the split (3.1-3.6, pre-engineering): {df.shape[0]} rows x {df.shape[1]} columns")
 print(f"X_train: {X_train.shape} | X_test: {X_test.shape}")
 
 print(f"\n--- Raw features retained as-is ({len(retained_raw_cols)}) ---")
 print(retained_raw_cols)
 
-print(f"\n--- Raw features dropped ({len(dropped_cols)}) ---")
+print(f"\n--- Raw features dropped in 3.7 ({len(dropped_cols)}) ---")
 print(dropped_cols)
 
-print(f"\n--- Engineered/encoded features created ({len(engineered_cols)}) ---")
+print(f"\n--- Engineered/encoded features created (3.8+3.9) ({len(engineered_cols)}) ---")
 print(engineered_cols)
 
 print(f"\n--- Missing value confirmation ---")
 print(f"Remaining NaN in X_train: {X_train.isna().sum().sum()}")
 print(f"Remaining NaN in X_test:  {X_test.isna().sum().sum()}")
 
-remaining_nan_df = df.isna().sum()
-remaining_nan_df = remaining_nan_df[remaining_nan_df > 0]
-if len(remaining_nan_df) == 0:
-    print("Remaining NaN in df (pre-split): 0")
-else:
-    print(f"Remaining NaN in df (pre-split): {remaining_nan_df.sum()} total, in {len(remaining_nan_df)} column(s):")
-    print(remaining_nan_df)
-    print("Explanation: these are the columns 3.11 imputes AFTER the train/test split")
-    print("(median fit on X_train only). df itself is left with real NaN on purpose,")
-    print("so EDA reads genuinely observed values, not a full-dataset statistic that")
-    print("would leak into what should be an X_train-only computation.")
-
 print("\n--- Summary table ---")
 
 """
-Every value below is read from a variable already computed earlier in this
-script (RAW_COLUMNS/cols_no_engineering/cols_replaced_by_engineering/
-X_train/X_test/df), not re-typed by hand - so this table can't silently
-drift out of sync with what the pipeline actually did.
-
-"Row-identical groups" is intentionally NOT "remaining duplicate rows" -
-df.duplicated().sum() would report a nonzero count here, which would
-misleadingly read as "a cleanup step that didn't finish." It's the opposite:
-these rows are different real listings that were deliberately kept (not
-3.2's kind of duplicate - see the 3.7 post-drop re-check above), with the
-actual train/test leakage risk handled by 3.11's group-aware split instead.
-This row reports the group count as evidence that risk was addressed, not as
-an outstanding cleanup item.
+"Row-identical groups split across train/test" - an earlier version of this
+pipeline used a GroupShuffleSplit specifically to force this count to 0.
+3.11 now uses a plain train_test_split for simplicity instead, so this
+number is expected to be non-zero: it counts feature-identical rows
+(different real listings that happen to agree on every retained column,
+once identifying columns are dropped in 3.7) that landed on opposite sides
+of the split. This is documented as an accepted limitation of the
+simplified split, not a bug - see 3.11's docstring above.
 """
 _train_tagged = X_train.assign(price=y_train.values, _src='train')
 _test_tagged = X_test.assign(price=y_test.values, _src='test')
@@ -1357,59 +1289,37 @@ _cross_dup = _combined[_combined.duplicated(subset=_feature_cols, keep=False)]
 _sources_per_group = _cross_dup.groupby(_feature_cols, dropna=False)['_src'].apply(set)
 cross_split_leaked_groups = int((_sources_per_group.apply(len) > 1).sum())
 
-"""
-X_train/X_test' column count differs from df's pre-split feature count for
-two reasons, both introduced in Part 3 (after the 3.11 split, fit on X_train
-only): State/Property Type's one-hot columns are ADDED (their raw text
-columns stay in df - only dropped from X_train/X_test, once the fit-dependent
-merge+encoding is done - see the 3.7 Stage B docstring), and a *_Missing
-indicator flag is ADDED per imputed column. Each count below is read from a
-variable already computed earlier in Part 3 (state_dummies_train /
-property_type_dummies_train / IMPUTE_COLS), not hardcoded, so this table
-can't silently drift out of sync with what the pipeline actually did.
-"""
 state_onehot_added = len(state_dummies_train.columns)
 property_type_onehot_added = len(property_type_dummies_train.columns)
-missing_indicator_flags_added = len(IMPUTE_COLS)
-raw_cols_dropped_post_split = 2  # State, Property Type - dropped from X_train/X_test only (Part 3), not from df
+missing_indicator_flags_added = len(IMPUTE_FLAG_COLS)
 
 summary_table = pd.DataFrame({
     "Item": [
-        "Final number of rows (pre-split df)",
-        "Final number of features (X, pre-split)",
-        "Numerical features",
-        "Non-numeric features remaining",
+        "Cleaned rows entering split (pre-engineering, 3.1-3.6)",
         "Raw features retained as-is",
         "Raw features dropped (Section 3.7)",
-        "Engineered features created (3.8+3.9 fixed rules)",
-        "State one-hot columns added (Part 3, fit on X_train)",
-        "Property Type one-hot columns added (Part 3, fit on X_train)",
-        "Raw State/Property Type columns dropped post-split (Part 3)",
-        "Missing-value indicator flags added (Part 3)",
+        "Engineered/encoded features created (3.8+3.9)",
+        "State one-hot columns added (3.9, fit on X_train)",
+        "Property Type one-hot columns added (3.9, fit on X_train)",
+        "Missing-value indicator flags added",
         "Final number of features in X_train/X_test",
         "Training set shape",
         "Testing set shape",
         "Remaining missing values (X_train + X_test)",
-        "Row-identical groups retained (not deleted - see 3.7 note)",
-        "Row-identical groups split across train/test (should be 0)",
+        "Row-identical groups split across train/test (known limitation, see 3.11)",
     ],
     "Result": [
         df.shape[0],
-        df.drop(columns=['price']).shape[1],
-        len(df.select_dtypes(include=['int64', 'float64']).columns),
-        len(df.select_dtypes(exclude=['int64', 'float64']).columns),
         len(retained_raw_cols),
         len(dropped_cols),
         len(engineered_cols),
         state_onehot_added,
         property_type_onehot_added,
-        raw_cols_dropped_post_split,
         missing_indicator_flags_added,
         X_train.shape[1],
         str(X_train.shape),
         str(X_test.shape),
         int(X_train.isna().sum().sum() + X_test.isna().sum().sum()),
-        int((row_group_ids.value_counts() > 1).sum()),
         cross_split_leaked_groups,
     ]
 })
