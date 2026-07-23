@@ -19,7 +19,9 @@ RAW_COLUMNS = list(df.columns)  # snapshot for 3.12's summary - kept vs dropped 
 
 DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
+EXTRA_DIR = os.path.join(BASE_DIR, "data", "extra")
 os.makedirs(PROCESSED_DIR, exist_ok=True)
+os.makedirs(EXTRA_DIR, exist_ok=True)
 
 # ============================================================
 # Step 0 — Review (observe only, no changes made)
@@ -91,10 +93,10 @@ plt.savefig(os.path.join(DOWNLOADS_DIR, "fig01_missing_bar.png"), dpi=150, bbox_
 plt.close()
 
 # ============================================================
-# 3.2 Duplicate Removal
+# 3.2.1 Duplicate Removal
 # ============================================================
 print("\n" + "="*60)
-print("STEP 3.2: DUPLICATE HANDLING")
+print("STEP 3.2.1: DUPLICATE HANDLING")
 print("="*60)
 
 shape_before = df.shape[0]
@@ -173,6 +175,58 @@ print("listing events, not duplicate scrapes of the same ad. Likely represents")
 print("re-listing of the same property over time. Retained (not removed) as")
 print("there is no evidence this is a data collection error.")
 
+# near_dup_count above (25) counts DUPLICATE ROWS under pandas' default
+# keep='first' - every row in a group except its first occurrence. Grouping
+# the same rows by check_cols instead counts GROUPS, a different unit: 23
+# groups covering 48 rows total (48 - 23 = 25, so the two numbers agree,
+# they just measure rows-beyond-the-first vs. groups).
+near_dup_mask = df.duplicated(subset=check_cols, keep=False)
+near_dup_df = df.loc[near_dup_mask].copy()
+group_ids = near_dup_df.groupby(check_cols, dropna=False, sort=False).ngroup()
+near_dup_df.insert(0, 'group_id', group_ids)
+
+# Verify the premise: within each group, does 'description' actually differ,
+# or does it also happen to match (making the pair closer to an exact
+# duplicate that only differs by Ad List)?
+near_dup_df.insert(1, 'description_identical', near_dup_df.groupby('group_id')['description']
+                    .transform(lambda s: s.nunique(dropna=False) <= 1))
+near_dup_df = near_dup_df.sort_values(['group_id', 'Ad List'], kind='stable')
+
+print(f"\nNear-duplicate groups: {near_dup_df['group_id'].nunique()} ({len(near_dup_df)} rows involved)")
+print(f"Groups where description is ALSO identical (closer to an exact duplicate): "
+      f"{near_dup_df.loc[near_dup_df['description_identical'], 'group_id'].nunique()}")
+
+near_dup_df.to_csv(os.path.join(EXTRA_DIR, "near_duplicate.csv"), index=False)
+print(f"Saved to {EXTRA_DIR}\\near_duplicate.csv")
+
+# ============================================================
+# 3.2.2 Unrelated Row Removal
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.2.2: UNRELATED ROW REMOVAL")
+print("="*60)
+
+"""
+Property Type == 'Others' is a catch-all label that doesn't identify a real
+condominium/apartment-family property type, unlike the other 7 categories
+(Condominium, Apartment, Service Residence, Flat, Studio, Duplex, Townhouse
+Condo). Since this project analyses condominium prices specifically, these
+rows are out of scope - removed as unrelated records, not a data quality fix.
+"""
+shape_before_unrelated = df.shape[0]
+other_count = (df['Property Type'] == 'Others').sum()
+
+df = df[df['Property Type'] != 'Others']
+shape_after_unrelated = df.shape[0]
+
+print(f"Rows with Property Type == 'Others': {other_count}")
+print(f"Rows before removal (end of 3.2.1): {shape_before_unrelated}")
+print(f"Rows after removing Property Type == 'Others': {shape_after_unrelated}")
+
+df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
+print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
+
 # ============================================================
 # 3.3 Data Type Conversion
 # ============================================================
@@ -245,15 +299,22 @@ print("\n" + "="*60)
 print("STEP 3.4: INVALID VALUE CORRECTION")
 print("="*60)
 
-"""
-Property Size is cross-checked against the 'sq.ft' figure independently
-stated in the description. Two rules: (a) below a physically possible size
-is invalid; (b) ~10x/100x/1000x the description value is a digit-shift
-extraction error. Values matching neither (e.g. 9,376/9,800 sq.ft.) are
-deferred to Section 3.6 as genuine extreme values.
-"""
 df['Property Size'] = df['Property Size'].astype(float)  # a correction may add a decimal or NaN
 
+print("\n--- Property Size: bottom 1% before correction ---")
+size_p1_threshold = df['Property Size'].quantile(0.01)
+print(f"1st percentile threshold: {size_p1_threshold:.1f} sq.ft.")
+print(df.loc[df['Property Size'] <= size_p1_threshold, ['Ad List', 'Property Size']].to_string(index=False))
+
+"""
+Property Size is cross-checked against the 'sq.ft' figure independently
+stated in the description. Ad List 103788197 (1 sq.ft.) and 103423738
+(9 sq.ft.) are the two rows the bottom 1% scan above surfaces as
+physically impossible - a plain extraction failure, not a real property
+size. Targeted directly by Ad List (same reasoning as the Facilities '10'
+fix below): the bottom 1% scan already confirms these are the only two
+affected rows, so no blanket below-threshold scan is needed.
+"""
 SIZE_PATTERN = re.compile(
     r'(\d[\d,]*\.?\d*)\s*(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)(?!\w)',
     re.IGNORECASE
@@ -265,104 +326,62 @@ def extract_size_from_description(text):
     match = SIZE_PATTERN.search(str(text))
     return float(match.group(1).replace(',', '')) if match else np.nan
 
-desc_size = df['description'].apply(extract_size_from_description)
-
-IMPOSSIBLE_MIN_SIZE = 100  # smallest genuine studio/SoHo units run ~200+ sq.ft.
-too_small_mask = df['Property Size'] < IMPOSSIBLE_MIN_SIZE
-
-
-"""
-Ratio check only applies above 8,000 sq.ft.: without this guard, a genuine
-1,213 sq.ft. unit (Ad List 103788229) would get "corrected" by an unrelated
-typo in its own description ("1.213 sqft"), since the ratio also lands on ~1000x.
-"""
-LARGE_SUSPECT_MIN = 8000
-large_suspect_mask = df['Property Size'] > LARGE_SUSPECT_MIN
-
-ratio = df['Property Size'] / desc_size
-digit_shift_mask = large_suspect_mask & desc_size.notna() & ratio.apply(
-    lambda r: pd.notna(r) and r > 0 and any(abs(r / p - 1) < 0.05 for p in [10, 100, 1000])
-)
-
-size_flag_mask = too_small_mask | digit_shift_mask
-print(f"Property Size flagged below screening threshold (< {IMPOSSIBLE_MIN_SIZE} sq.ft.): {too_small_mask.sum()}")
-print(f"Property Size flagged by digit-shift artefact (~10x/100x/1000x description):  {digit_shift_mask.sum()}")
-
+PROPERTY_SIZE_FIX_ADLIST = [103788197, 103423738]
 size_log = []
-for idx in df.index[size_flag_mask]:
+for adlist in PROPERTY_SIZE_FIX_ADLIST:
+    idx = df.index[df['Ad List'] == adlist][0]
     old_val = df.loc[idx, 'Property Size']
-    dval = desc_size.loc[idx]
-    if pd.notna(dval):
-        df.loc[idx, 'Property Size'] = dval
-        final_val = round(dval)
-    else:
-        df.loc[idx, 'Property Size'] = np.nan
-        final_val = np.nan
+    dval = extract_size_from_description(df.loc[idx, 'description'])
+    df.loc[idx, 'Property Size'] = dval
     size_log.append({
-        "Ad List": df.loc[idx, 'Ad List'],
+        "Ad List": adlist,
         "Original Size": old_val,
         "Description Size": dval,
-        "Final Size": final_val,
+        "Final Size": round(dval) if pd.notna(dval) else np.nan,
     })
 
 size_log_df = pd.DataFrame(size_log)
-print("\n--- Property Size Correction Log ---")
+print("\n--- Property Size Correction Log (Ad List, original vs. description-confirmed value) ---")
 print(size_log_df.to_string(index=False))
 
-large_deferred = df.loc[(df['Property Size'] > 8000) & (~size_flag_mask), ['Ad List', 'Property Size']]
-
 # Property Size is integer sq.ft. in this dataset; round the one decimal the
-# digit-shift correction introduced, then cast back to int64 (still 0-missing).
+# description correction introduced, then cast back to int64 (still 0-missing).
 df['Property Size'] = df['Property Size'].round().astype(int)
+print("\n" + "-"*60)
 
-# Blanket regex cross-check against description was tested but rejected: 878
-# mismatches dataset-wide, mostly false positives (see notes/bedroom_bathroom_
-# regex_false_positives.csv). Instead, only singleton values (value_counts()==1)
-# were individually verified against description.
-room_corrections = [
-    {"Ad List": 102236931, "Column": "Bedroom", "Original": 10, "Description evidence": 3,
-     "Note": "Description states '3-Bedrooms' (and '3-Bathroom', matching the existing Bathroom value)."},
-    {"Ad List": 103207012, "Column": "Bathroom", "Original": 8, "Description evidence": 2,
-     "Note": "Description states '2 Bathrooms' in both unit configurations listed; 8 does not appear."},
-    {"Ad List": 96822478, "Column": "Bedroom", "Original": 8, "Description evidence": 8,
-     "Note": "Description confirms '8 Bedrooms'; retained as genuine, not a data error."},
-]
-for corr in room_corrections:
-    df.loc[df['Ad List'] == corr["Ad List"], corr["Column"]] = corr["Description evidence"]
-room_log_df = pd.DataFrame(room_corrections).rename(columns={
-    "Column": "Variable",
-    "Original": "Original Value",
-    "Description evidence": "Description Value",
-})
-room_log_df["Final Value"] = room_log_df["Description Value"]
-print("\n--- Bedroom / Bathroom Correction Log ---")
-print(room_log_df[["Ad List", "Variable", "Original Value", "Description Value", "Final Value"]].to_string(index=False))
+print("\n--- Facilities: remove scraping artefact '10' ---")
 
-print(f"\nRemaining large Property Size values deferred to Section 3.6 (not modified in this stage): {len(large_deferred)}")
-print(large_deferred.to_string(index=False))
+"""
+Ad List 95706905's Facilities value ends in a stray "10" - not a real
+facility name, a scraping artefact. Confirmed unique to this one row (every
+row's comma-separated Facilities items were checked for a standalone
+digit-only token; no other row has this issue), so the fix targets this Ad
+List directly rather than a blanket rule, and only removes the "10" token,
+not the row.
+"""
+FACILITIES_FIX_ADLIST = 95706905
+old_facilities = df.loc[df['Ad List'] == FACILITIES_FIX_ADLIST, 'Facilities'].iloc[0]
+new_facilities = re.sub(r',\s*10\s*$', '', old_facilities)
+df.loc[df['Ad List'] == FACILITIES_FIX_ADLIST, 'Facilities'] = new_facilities
+print(f"Ad List {FACILITIES_FIX_ADLIST}")
+print(f"  Before: {old_facilities}")
+print(f"  After:  {new_facilities}")
+print("\n" + "-"*60)
 
-# Total Units == 1 doesn't match genuine multi-unit developments (confirmed via
-# description); treated as a scraping placeholder rather than a real count.
-total_units_sentinel_mask = df['Total Units'] == 1
-print(f"\n'Total Units' == 1 (suspected placeholder, not a genuine value): {total_units_sentinel_mask.sum()}")
-df.loc[total_units_sentinel_mask, 'Total Units'] = np.nan
-
-# No independent field verifies floor count; values above Malaysia's tallest
-# building (Merdeka 118, 118 storeys) are physically impossible and flagged.
-FLOOR_MAX = 118
+# No independent field verifies floor count, so any generic round-number
+# cutoff works as a screen. Malaysia's tallest building (Merdeka 118, 118
+# storeys) is no longer used as the benchmark - 78 is used instead as a
+# plain threshold not tied to any specific building. The data has a natural
+# gap between the highest plausible value (63) and the next value up (135),
+# so 78 and 118 flag the exact same rows today; the lower threshold is what
+# keeps this screen meaningful if a future data pull adds values in between.
+FLOOR_MAX = 78
 floor_invalid_mask = df['# of Floors'] > FLOOR_MAX
 print(f"\n'# of Floors' > {FLOOR_MAX} (unlikely): {floor_invalid_mask.sum()}")
 print(df.loc[floor_invalid_mask, ['Ad List', '# of Floors']].to_string(index=False))
 df.loc[floor_invalid_mask, '# of Floors'] = np.nan
 
-# Parking Lot values of 9-10 paired with low-cost listings look suspicious, but
-# unlike Property Size there's no independent field to confirm they're wrong,
-# so they're left unchanged here and revisited in Section 3.6.
-parking_suspect_count = (df['Parking Lot'] >= 9).sum()
-print(f"\n'Parking Lot' >= 9 (context looks suspicious, no evidence to confirm error): {parking_suspect_count} - left unchanged, revisited in 3.6")
-
 print(f"\nProperty Size range after 3.4: {df['Property Size'].min()} - {df['Property Size'].max()}")
-print(f"Total Units range after 3.4:   {df['Total Units'].min()} - {df['Total Units'].max()}")
 print(f"# of Floors range after 3.4:   {df['# of Floors'].min()} - {df['# of Floors'].max()}")
 
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
@@ -410,14 +429,10 @@ if room_recovery_df.empty:
 else:
     print(room_recovery_df.to_string(index=False))
 
-# "Unknown" category instead of mode, which would inflate the most common range.
-floor_range_missing = df['Floor Range'].isna().sum()
-df['Floor Range'] = df['Floor Range'].fillna('Unknown')
-print(f"\n'Floor Range' missing values filled with 'Unknown': {floor_range_missing}")
-
-# Completion Year / # of Floors / Total Units / Parking Lot: median + missing-
-# indicator imputation is deferred to the 3.11 modelling pipeline (fit on
-# X_train only) to avoid test-set leakage. Left as real NaN here for EDA.
+# Floor Range / Completion Year / # of Floors / Total Units / Parking Lot:
+# median/mode + missing-indicator imputation is deferred to the 3.11
+# modelling pipeline (fit on X_train only) to avoid test-set leakage. Left
+# as real NaN here for EDA.
 
 # Columns deferred to 3.7 (dropped) / 3.8 (transformed) are documented in
 # notes_missing_value_decision_audit.md.
