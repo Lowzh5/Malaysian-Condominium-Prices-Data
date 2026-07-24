@@ -18,11 +18,19 @@ csv_path = os.path.join(BASE_DIR, "data", "raw", "houses.csv")
 df = pd.read_csv(csv_path)
 RAW_COLUMNS = list(df.columns)  # snapshot for 3.12's summary - kept vs dropped vs engineered
 
-DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
+# CLEANING_FIGURES_DIR holds diagnostic plots from the cleaning pipeline
+# (missing-value map, outlier detection) - separate from EDA_DIR, which is
+# the 4.0 EDA report's own output (train_for_eda.csv + its figures).
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 EXTRA_DIR = os.path.join(BASE_DIR, "data", "extra")
+MODELLING_DIR = os.path.join(BASE_DIR, "data", "modelling")
+EDA_DIR = os.path.join(BASE_DIR, "data", "eda")
+CLEANING_FIGURES_DIR = os.path.join(BASE_DIR, "data", "cleaning_figures")
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 os.makedirs(EXTRA_DIR, exist_ok=True)
+os.makedirs(MODELLING_DIR, exist_ok=True)
+os.makedirs(EDA_DIR, exist_ok=True)
+os.makedirs(CLEANING_FIGURES_DIR, exist_ok=True)
 
 # ============================================================
 # Step 0 — Review (observe only, no changes made)
@@ -90,7 +98,7 @@ ax.set_xlabel("Missing count")
 ax.bar_label(bars, labels=[f"{c} ({p}%)" for c, p in zip(missing_cols["missing_count"], missing_cols["missing_pct"])],
              padding=3, fontsize=8)
 plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig01_missing_bar.png"), dpi=150, bbox_inches="tight")
+plt.savefig(os.path.join(CLEANING_FIGURES_DIR, "fig01_missing_bar.png"), dpi=150, bbox_inches="tight")
 plt.close()
 
 # ============================================================
@@ -161,8 +169,8 @@ after_merge_snapshot = df[df['Ad List'].isin(dup_groups)].copy()
 after_merge_snapshot.insert(0, 'stage', 'after_merge')
 comparison_df = pd.concat([before_merge_snapshot, after_merge_snapshot], ignore_index=True)
 comparison_df = comparison_df.sort_values(['Ad List', 'stage'])
-comparison_df.to_csv(os.path.join(PROCESSED_DIR, "adlist_merge_before_after.csv"), index=False)
-print(f"\nBefore/after merge comparison saved to {PROCESSED_DIR}\\adlist_merge_before_after.csv")
+comparison_df.to_csv(os.path.join(EXTRA_DIR, "adlist_merge_before_after.csv"), index=False)
+print(f"\nBefore/after merge comparison saved to {EXTRA_DIR}\\adlist_merge_before_after.csv")
 
 # Stage 3 — near-duplicate re-listings: same content, different Ad List
 # (likely re-listed over time, not a collection error).
@@ -554,7 +562,7 @@ def boxplot_zscore_figure(train_series, label, filename):
     axes[1].legend(fontsize=8)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(DOWNLOADS_DIR, filename), dpi=150, bbox_inches="tight")
+    plt.savefig(os.path.join(CLEANING_FIGURES_DIR, filename), dpi=150, bbox_inches="tight")
     plt.close()
 
     print(f"\n{label}: IQR bounds [{lo:.1f}, {hi:.1f}], IQR outliers: {iqr_outlier.sum()}")
@@ -615,7 +623,7 @@ def mahalanobis_figure(pair_df, xcol, ycol, title, filename):
     ax.set_title(f"{title} (X_train, Mahalanobis Distance)")
     ax.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(DOWNLOADS_DIR, filename), dpi=150, bbox_inches="tight")
+    plt.savefig(os.path.join(CLEANING_FIGURES_DIR, filename), dpi=150, bbox_inches="tight")
     plt.close()
 
     print(f"Mahalanobis threshold (chi2, df=2, 97.5%): {threshold:.2f}")
@@ -1106,7 +1114,7 @@ eda_train = X_train.drop(columns=eda_cols_to_drop).copy()
 # houses_cleaned.csv) - round() clears the float noise np.exp(log(x))
 # round-tripping introduces (e.g. 350000 -> 350000.0000000001).
 eda_train['price'] = np.exp(y_train).round().astype(int)
-eda_train.to_csv(os.path.join(PROCESSED_DIR, "train_for_eda.csv"), index=False)
+eda_train.to_csv(os.path.join(EDA_DIR, "train_for_eda.csv"), index=False)
 print(f"train_for_eda.csv saved: {eda_train.shape}")
 
 print("\n--- State: rare-category merge + one-hot encoding (fit on X_train only) ---")
@@ -1344,12 +1352,12 @@ print(f"Remaining NaN in X_test:  {X_test.isna().sum().sum()}")
 assert X_train.isna().sum().sum() == 0
 assert X_test.isna().sum().sum() == 0
 
-X_train.to_csv(os.path.join(PROCESSED_DIR, "X_train.csv"), index=False)
-X_test.to_csv(os.path.join(PROCESSED_DIR, "X_test.csv"), index=False)
-y_train.to_csv(os.path.join(PROCESSED_DIR, "y_train.csv"), index=False)
-y_test.to_csv(os.path.join(PROCESSED_DIR, "y_test.csv"), index=False)
-joblib.dump((X_train, X_test, y_train, y_test), os.path.join(PROCESSED_DIR, "train_test_split.pkl"))
-print(f"\nSaved X_train/X_test/y_train/y_test to {PROCESSED_DIR}")
+X_train.to_csv(os.path.join(MODELLING_DIR, "X_train.csv"), index=False)
+X_test.to_csv(os.path.join(MODELLING_DIR, "X_test.csv"), index=False)
+y_train.to_csv(os.path.join(MODELLING_DIR, "y_train.csv"), index=False)
+y_test.to_csv(os.path.join(MODELLING_DIR, "y_test.csv"), index=False)
+joblib.dump((X_train, X_test, y_train, y_test), os.path.join(MODELLING_DIR, "train_test_split.pkl"))
+print(f"\nSaved X_train/X_test/y_train/y_test to {MODELLING_DIR}")
 
 # ============================================================
 # 3.10 Feature Scaling (executed after imputation, using only
@@ -1404,10 +1412,10 @@ Gradient Boosting) don't need this transform and can use that
 untransformed-but-imputed version directly. No scaler object to persist
 here (log1p is stateless), unlike the StandardScaler version this replaced.
 """
-X_train.to_csv(os.path.join(PROCESSED_DIR, "X_train_scaled.csv"), index=False)
-X_test.to_csv(os.path.join(PROCESSED_DIR, "X_test_scaled.csv"), index=False)
-joblib.dump((X_train, X_test, y_train, y_test), os.path.join(PROCESSED_DIR, "train_test_split_scaled.pkl"))
-print(f"\nSaved log-transformed X_train_scaled/X_test_scaled (untransformed X_train.csv/X_test.csv left untouched) to {PROCESSED_DIR}")
+X_train.to_csv(os.path.join(MODELLING_DIR, "X_train_scaled.csv"), index=False)
+X_test.to_csv(os.path.join(MODELLING_DIR, "X_test_scaled.csv"), index=False)
+joblib.dump((X_train, X_test, y_train, y_test), os.path.join(MODELLING_DIR, "train_test_split_scaled.pkl"))
+print(f"\nSaved log-transformed X_train_scaled/X_test_scaled (untransformed X_train.csv/X_test.csv left untouched) to {MODELLING_DIR}")
 
 # ============================================================
 # 3.12 Final Dataset Structure Summary

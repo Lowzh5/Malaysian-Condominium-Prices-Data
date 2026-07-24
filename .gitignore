@@ -22,3 +22,8 @@ Thumbs.db
 # Generated/derived data (reproducible from data/raw + src pipeline scripts)
 data/processed/*.pkl
 data/processed/*.csv
+data/modelling/*.pkl
+data/modelling/*.csv
+data/eda/*.csv
+data/eda/*.png
+data/cleaning_figures/*.png

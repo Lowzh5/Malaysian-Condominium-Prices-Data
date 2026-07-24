@@ -2,16 +2,23 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import seaborn as sns
 from scipy import stats
 
 pd.set_option('display.max_columns', None)
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
-DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
+def show_full_numbers(ax, axis='x'):
+    """Replace matplotlib's default 1e6-style offset notation with plain,
+    comma-separated numbers (e.g. 1,000,000 instead of 1e6)."""
+    formatter = mticker.FuncFormatter(lambda val, _: f"{val:,.0f}")
+    (ax.xaxis if axis == 'x' else ax.yaxis).set_major_formatter(formatter)
 
-df = pd.read_csv(os.path.join(PROCESSED_DIR, "train_for_eda.csv"))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EDA_DIR = os.path.join(BASE_DIR, "data", "eda")
+os.makedirs(EDA_DIR, exist_ok=True)
+
+df = pd.read_csv(os.path.join(EDA_DIR, "train_for_eda.csv"))
 price = df['price']
 
 # ============================================================
@@ -49,8 +56,9 @@ ax.set_xlabel("Price (RM)")
 ax.set_ylabel("Count")
 ax.set_title("4.1.1 Price Distribution (raw, train set)")
 ax.legend()
+show_full_numbers(ax, 'x')
 plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "eda_411_price_hist_kde.png"), dpi=150, bbox_inches="tight")
+plt.savefig(os.path.join(EDA_DIR, "eda_411_price_hist_kde.png"), dpi=150, bbox_inches="tight")
 plt.close()
 print("Saved: eda_411_price_hist_kde.png")
 
@@ -71,13 +79,14 @@ fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 sns.histplot(price, kde=True, bins=50, color="#4C72B0", ax=axes[0])
 axes[0].set_title(f"Raw Price (skew = {skew_raw:.2f})")
 axes[0].set_xlabel("Price (RM)")
+show_full_numbers(axes[0], 'x')
 
 sns.histplot(log_price, kde=True, bins=50, color="#DD8452", ax=axes[1])
 axes[1].set_title(f"log10(Price) (skew = {skew_log:.2f})")
 axes[1].set_xlabel("log10(Price)")
 
 plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "eda_412_price_log_comparison.png"), dpi=150, bbox_inches="tight")
+plt.savefig(os.path.join(EDA_DIR, "eda_412_price_log_comparison.png"), dpi=150, bbox_inches="tight")
 plt.close()
 print("Saved: eda_412_price_log_comparison.png")
 
@@ -130,7 +139,8 @@ order = summary.index.tolist()
 sns.boxplot(data=sub, x='Property Type', y='price', order=order, ax=ax)
 ax.set_ylabel("Price (RM)")
 ax.set_title("4.1.3 Price Distribution by Property Type (major categories)")
+show_full_numbers(ax, 'y')
 plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "eda_413_price_by_property_type.png"), dpi=150, bbox_inches="tight")
+plt.savefig(os.path.join(EDA_DIR, "eda_413_price_by_property_type.png"), dpi=150, bbox_inches="tight")
 plt.close()
 print("Saved: eda_413_price_by_property_type.png")
