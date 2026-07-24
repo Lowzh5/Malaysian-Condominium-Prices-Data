@@ -1102,7 +1102,10 @@ eda_cols_to_drop = [
     # category, so only its Has_* multi-hot form is kept.
 ]
 eda_train = X_train.drop(columns=eda_cols_to_drop).copy()
-eda_train['price'] = np.exp(y_train)
+# price is always a whole RM amount in the source data (verified int64 in
+# houses_cleaned.csv) - round() clears the float noise np.exp(log(x))
+# round-tripping introduces (e.g. 350000 -> 350000.0000000001).
+eda_train['price'] = np.exp(y_train).round().astype(int)
 eda_train.to_csv(os.path.join(PROCESSED_DIR, "train_for_eda.csv"), index=False)
 print(f"train_for_eda.csv saved: {eda_train.shape}")
 
