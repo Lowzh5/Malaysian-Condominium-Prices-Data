@@ -5,10 +5,11 @@ import re
 import joblib
 
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
+from matplotlib.patches import Ellipse
 import seaborn as sns
 from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
 from sklearn.model_selection import train_test_split
+from scipy.stats import chi2
 
 pd.set_option('display.max_columns', None)
 
@@ -450,154 +451,8 @@ joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 
 # ============================================================
-# 3.6 Outlier Treatment
-# ============================================================
-print("\n" + "="*60)
-print("STEP 3.6: OUTLIER TREATMENT")
-print("="*60)
-
-# Price: raw vs log boxplot - log compresses the right-skewed scale so the
-# bulk of listings aren't dominated by the high tail (outliers stay visible).
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# original price
-sns.boxplot(x=df['price'], ax=axes[0]) #right graph, draw box, whisker, outliers
-axes[0].set_title("Raw Listing Price")
-axes[0].set_xlabel("Listing Price (RM)")
-axes[0].xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}')) # convert 1ef to 1,000,000
-
-#log price
-sns.boxplot(x=np.log(df['price']), ax=axes[1])
-axes[1].set_title("Log-transformed Price")
-axes[1].set_xlabel("ln(Listing Price)")
-plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig02_price_boxplot.png"), dpi=150, bbox_inches="tight")
-plt.close()
-
-price_q1, price_q3 = df['price'].quantile([0.25, 0.75])
-# 没有算lower bound是因为得出来的是negative
-price_upper = price_q3 + 1.5 * (price_q3 - price_q1) # print colsole output mention有多少 > upper bound
-print(f"Price IQR upper bound: RM{price_upper:,.0f}; values above: {(df['price'] > price_upper).sum()}")
-print(f"Price skewness: raw = {df['price'].skew():.2f}, log = {np.log(df['price']).skew():.2f}")
-
-# Bedroom/Bathroom IQR is degenerate (Q1==Q3) - not usable as a rule; their
-# extreme values were already corrected in 3.4 using description evidence.
-print(f"\nBedroom IQR: Q1={df['Bedroom'].quantile(.25)}, Q3={df['Bedroom'].quantile(.75)} (degenerate, not used as a rule)")
-print(f"Bathroom IQR: Q1={df['Bathroom'].quantile(.25)}, Q3={df['Bathroom'].quantile(.75)} (degenerate, not used as a rule)")
-
-# Property Size vs Price: candidates are `large_deferred` from 3.4 (>8000 sq.ft,
-# not caught by digit-shift) - reused, not re-picked, so results stay reproducible.
-LARGE_SIZE_REVIEW_ADLIST = large_deferred['Ad List'].tolist()
-review_check = df.loc[df['Ad List'].isin(LARGE_SIZE_REVIEW_ADLIST),
-                       ['Ad List', 'Property Size', 'price']].copy()
-review_check['Ad List'] = review_check['Ad List'].astype(int)
-review_check['price_per_sqft'] = (review_check['price'] / review_check['Property Size']).round(1)
-
-fig, ax = plt.subplots(figsize=(9, 6)) # Create a 9x6 inch blank canvas and a drawing area (ax)
-sns.scatterplot(data=df, x='Property Size', y='price', hue='Property Type', alpha=0.5, ax=ax) # first layer
-ax.scatter(review_check['Property Size'], review_check['price'], color='red', s=150,
-           marker='X', label='Large size under review', zorder=5) # second layer
-for _, r in review_check.iterrows():
-    ax.annotate(
-        f"Ad List {int(r['Ad List'])}\n{r['Property Size']:,.0f} sq.ft.\nRM{r['price_per_sqft']:,.1f}/sqft",
-        xy=(r['Property Size'], r['price']), xytext=(10, 10), textcoords='offset points',
-        fontsize=8, color='red'
-    )
-ax.set_title("Property Size vs Price")
-ax.set_ylabel("Listing Price (RM)")
-ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
-ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig03_size_vs_price.png"), dpi=150, bbox_inches="tight")
-plt.close()
-
-# Price per sq.ft.: a size-price consistency check - unusually low means size
-# is large relative to price. The 3 review records are marked with vlines.
-price_per_sqft = df['price'] / df['Property Size']
-fig, ax = plt.subplots(figsize=(8, 5))
-sns.histplot(price_per_sqft, bins=50, ax=ax)
-# Stagger annotation heights - two values (15.3/26.7) are close and would overlap.
-annotation_heights = [0.95, 0.75, 0.55]
-for (_, r), height in zip(review_check.sort_values('price_per_sqft').iterrows(), annotation_heights):
-    ax.axvline(r['price_per_sqft'], color='red', linestyle='--', linewidth=1)
-    ax.annotate(f"Ad List {int(r['Ad List'])} (RM{r['price_per_sqft']:,.1f}/sqft)",
-                xy=(r['price_per_sqft'], ax.get_ylim()[1] * height),
-                fontsize=8, color='red', ha='left', va='center',
-                xytext=(5, 0), textcoords='offset points')
-ax.set_title("Distribution of Listing Price per Square Foot")
-ax.set_xlabel("Price per sq.ft. (RM/sq.ft.)")
-plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig04_price_per_sqft.png"), dpi=150, bbox_inches="tight")
-plt.close()
-
-print("\n--- Price per sq.ft. for the 3 large Property Size records under review ---")
-print(review_check.to_string(index=False))
-
-# Parking Lot: IQR flags 33 candidates, but most pair with higher-priced
-# properties (not suspicious). A genuine candidate needs all three: high
-# (>IQR upper), rare (<=2 occurrences), AND price far below the median.
-parking_q1, parking_q3 = df['Parking Lot'].quantile([0.25, 0.75])
-parking_upper = parking_q3 + 1.5 * (parking_q3 - parking_q1)
-print(f"\nParking Lot IQR upper bound: {parking_upper}; candidate values above: {(df['Parking Lot'] > parking_upper).sum()}")
-
-parking_value_counts = df['Parking Lot'].value_counts()
-rare_parking_values = parking_value_counts[parking_value_counts <= 2].index
-overall_median_price = df['price'].median()
-parking_candidate_mask = (
-    (df['Parking Lot'] > parking_upper)
-    & df['Parking Lot'].isin(rare_parking_values)
-    & (df['price'] < overall_median_price * 0.5)
-)
-PARKING_REVIEW_ADLIST = df.loc[parking_candidate_mask, 'Ad List'].tolist()
-# Property Size/Bedroom/Bathroom aren't part of the filter - shown here as
-# supporting context (all 3 are compact units, well below the 902 sq.ft. median).
-print(df.loc[parking_candidate_mask, ['Ad List', 'Parking Lot', 'price', 'Property Size', 'Bedroom', 'Bathroom']].to_string(index=False))
-
-# Parking Lot vs Price: a count plot alone can't show if a high count is
-# plausible - only price cross-check does. The 3 severe candidates are highlighted.
-fig, ax = plt.subplots(figsize=(9, 6))
-sns.scatterplot(data=df, x='Parking Lot', y='price', alpha=0.4, ax=ax)
-parking_review = df.loc[df['Ad List'].isin(PARKING_REVIEW_ADLIST), ['Ad List', 'Parking Lot', 'price', 'Property Size']].copy()
-parking_review['Ad List'] = parking_review['Ad List'].astype(int)
-ax.scatter(parking_review['Parking Lot'], parking_review['price'], color='red', s=150,
-           marker='X', label='High lot count under review', zorder=5)
-# The two 10-lot records (78k/88k) are close together - offset labels to avoid overlap.
-annotation_offsets = [(10, 10), (10, 65), (-100, 10)]
-for (_, r), offset in zip(parking_review.sort_values('price').iterrows(), annotation_offsets):
-    ax.annotate(f"Ad List {int(r['Ad List'])}\n{r['Parking Lot']:.0f} lots\nRM{r['price']:,.0f}\n{r['Property Size']:,.0f} sq.ft.",
-                xy=(r['Parking Lot'], r['price']), xytext=offset, textcoords='offset points',
-                fontsize=8, color='red')
-ax.set_title("Parking Lot vs Price")
-ax.set_ylabel("Listing Price (RM)")
-ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:,.0f}'))
-ax.legend()
-plt.tight_layout()
-plt.savefig(os.path.join(DOWNLOADS_DIR, "fig05_parking_vs_price.png"), dpi=150, bbox_inches="tight")
-plt.close()
-
-# --- Final treatment (Table 3.6) ---
-# Property Size: 103729938 (17,611 sq.ft.) has no source support and is
-# inconsistent with price/attributes -> converted to NaN. 96973074 (9,376) and
-# 103792765 (9,800) are retained - both have source-confirmed sizes in their
-# description, even though 96973074's price/sqft looks unusual.
-df.loc[df['Ad List'] == 103729938, 'Property Size'] = np.nan
-print("\nProperty Size converted to NaN: Ad List 103729938 (no source support, inconsistent)")
-print("Property Size retained: Ad List 96973074, 103792765 (source-confirmed size)")
-
-# Parking Lot: all 3 candidates lack independent evidence and are inconsistent
-# with price/property attributes -> converted to NaN.
-df.loc[df['Ad List'].isin(PARKING_REVIEW_ADLIST), 'Parking Lot'] = np.nan
-print(f"Parking Lot converted to NaN: Ad List {PARKING_REVIEW_ADLIST}")
-
-df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
-joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
-print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
-
-print(df.info())
-
-
-# ============================================================
-# 3.11 Train-Test Split (moved ahead of 3.7/3.8/3.9 - executed
+# 3.11 Train-Test Split (moved ahead of 3.7/3.8/3.9 and ahead of 3.6 -
+# executed
 # immediately after 3.6, before any feature engineering, encoding
 # or selection, so every fit-dependent step below can be fit on
 # X_train only and simply applied to X_test)
@@ -659,6 +514,283 @@ a trade-off for pipeline simplicity, not an oversight - the actual count of
 groups affected is measured after feature selection/encoding and reported
 in 3.12's summary table ("Row-identical groups split across train/test").
 """
+
+# ============================================================
+# 3.6 Outlier Treatment (moved after 3.11's split - boxplot, Z-score and
+# Mahalanobis distance statistics are all fit on X_train only, the same
+# leakage rule every other fit-dependent step in this pipeline follows.
+# Detection/visualisation only - no correction is applied in this section
+# yet, candidates are listed for manual review first.)
+# ============================================================
+print("\n" + "="*60)
+print("STEP 3.6: OUTLIER TREATMENT")
+print("="*60)
+
+Z_THRESHOLD = 3
+
+def boxplot_zscore_figure(train_series, label, filename):
+    s = train_series.dropna()
+    mean, std = s.mean(), s.std()
+    z = (s - mean) / std
+    z_outlier = z.abs() > Z_THRESHOLD
+
+    q1, q3 = s.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    iqr_outlier = (s < lo) | (s > hi)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    sns.boxplot(x=s, ax=axes[0], color="#4C72B0")
+    axes[0].set_title(f"{label} (X_train) - Boxplot (IQR)")
+    axes[0].set_xlabel(label)
+
+    axes[1].scatter(z.index, z, s=12, alpha=0.5, color="#4C72B0", label="within threshold")
+    axes[1].scatter(z.index[z_outlier], z[z_outlier], s=25, color="#C44E52", label=f"|Z| > {Z_THRESHOLD}")
+    axes[1].axhline(Z_THRESHOLD, color="#C44E52", linestyle="--", linewidth=1)
+    axes[1].axhline(-Z_THRESHOLD, color="#C44E52", linestyle="--", linewidth=1)
+    axes[1].set_title(f"{label} (X_train) - Z-score")
+    axes[1].set_xlabel("Row index")
+    axes[1].set_ylabel("Z-score")
+    axes[1].legend(fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(DOWNLOADS_DIR, filename), dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"\n{label}: IQR bounds [{lo:.1f}, {hi:.1f}], IQR outliers: {iqr_outlier.sum()}")
+    print(f"{label}: Z-score outliers (|Z| > {Z_THRESHOLD}): {z_outlier.sum()}")
+
+print("\n--- Property Size: boxplot (IQR) + Z-score ---")
+boxplot_zscore_figure(X_train['Property Size'], "Property Size", "fig06_property_size_outliers.png")
+
+print("\n--- Bedroom: boxplot (IQR) + Z-score ---")
+print(f"(Bedroom Q1={X_train['Bedroom'].quantile(.25)}, Q3={X_train['Bedroom'].quantile(.75)} "
+      f"- IQR may be degenerate if Q1==Q3)")
+boxplot_zscore_figure(X_train['Bedroom'], "Bedroom", "fig07_bedroom_outliers.png")
+
+print("\n--- Bathroom: boxplot (IQR) + Z-score ---")
+print(f"(Bathroom Q1={X_train['Bathroom'].quantile(.25)}, Q3={X_train['Bathroom'].quantile(.75)} "
+      f"- IQR may be degenerate if Q1==Q3)")
+boxplot_zscore_figure(X_train['Bathroom'], "Bathroom", "fig08_bathroom_outliers.png")
+
+print("\n--- Parking Lot: boxplot (IQR) + Z-score ---")
+boxplot_zscore_figure(X_train['Parking Lot'], "Parking Lot", "fig11_parking_lot_outliers.png")
+
+
+def mahalanobis_figure(pair_df, xcol, ycol, title, filename):
+    # Reindex to [xcol, ycol] explicitly - mean_vec/cov/ellipse below are all
+    # computed in this column order, so it must match the plot's x/y axes
+    # regardless of what order the caller's columns happen to be in.
+    pair = pair_df[[xcol, ycol]].dropna()
+    mean_vec = pair.mean().values
+    cov = np.cov(pair.values, rowvar=False)
+    inv_cov = np.linalg.inv(cov)
+    diff = pair.values - mean_vec
+    mahal_sq = np.einsum('ij,jk,ik->i', diff, inv_cov, diff)
+    threshold = chi2.ppf(0.975, df=2)
+    outlier = mahal_sq > threshold
+
+    # Confidence ellipse at the same chi2 threshold as the outlier cutoff -
+    # its axes come from the covariance matrix's eigenvectors/eigenvalues,
+    # so the ellipse is the direct visual boundary of "Mahalanobis distance
+    # <= threshold": any point outside it is exactly what's flagged red.
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = eigvals.argsort()[::-1]
+    eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+    angle = np.degrees(np.arctan2(eigvecs[1, 0], eigvecs[0, 0]))
+    width, height = 2 * np.sqrt(eigvals * threshold)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ellipse = Ellipse(xy=mean_vec, width=width, height=height, angle=angle,
+                       facecolor="#4C72B0", alpha=0.15, edgecolor="gray",
+                       linewidth=1.5, linestyle="--", zorder=1)
+    ax.add_patch(ellipse)
+    ax.scatter(pair.loc[~outlier, xcol], pair.loc[~outlier, ycol], s=15, alpha=0.6,
+               color="black", label="within threshold", zorder=2)
+    ax.scatter(pair.loc[outlier, xcol], pair.loc[outlier, ycol], s=40,
+               color="#DD8452", label="Mahalanobis outlier", zorder=3)
+    ax.scatter(*mean_vec, color="#4C72B0", marker="X", s=120, label="mean", zorder=4)
+    ax.set_xlabel(xcol)
+    ax.set_ylabel(ycol)
+    ax.set_title(f"{title} (X_train, Mahalanobis Distance)")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(DOWNLOADS_DIR, filename), dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"Mahalanobis threshold (chi2, df=2, 97.5%): {threshold:.2f}")
+    print(f"Outliers flagged: {outlier.sum()} / {len(pair)}")
+    return pair.index[outlier]
+
+print("\n--- Total Units vs # of Floors: Mahalanobis Distance ---")
+tu_outlier_idx = mahalanobis_figure(
+    X_train[['Total Units', '# of Floors']], '# of Floors', 'Total Units',
+    "Total Units vs # of Floors", "fig09_units_floors_mahalanobis.png"
+)
+print("Outlier Ad List (for manual review, no correction applied yet):")
+print(X_train.loc[tu_outlier_idx, ['Ad List', 'Total Units', '# of Floors']].to_string(index=False))
+
+print("\n--- Parking Lot vs price: Mahalanobis Distance ---")
+# y_train is log(price) (see 3.11 above) - converted back to RM here for interpretability.
+price_train_raw = np.exp(y_train)
+pl_pair = pd.DataFrame({'Parking Lot': X_train['Parking Lot'], 'price': price_train_raw})
+pl_outlier_idx = mahalanobis_figure(
+    pl_pair, 'Parking Lot', 'price', "Parking Lot vs price", "fig10_parking_price_mahalanobis.png"
+)
+print("Outlier Ad List (for manual review, no correction applied yet):")
+pl_review = X_train.loc[pl_outlier_idx, ['Ad List', 'Parking Lot']].copy()
+pl_review['price'] = price_train_raw.loc[pl_outlier_idx]
+print(pl_review.to_string(index=False))
+
+print("\n--- Confirmed corrections (manually reviewed against description) ---")
+
+"""
+Applied directly to whichever of X_train/X_test the row falls in - these are
+description-verified facts (not a fitted statistic like a median or an IQR
+bound), so there is no train/test leakage concern in correcting both splits
+the same way. More candidates from the outlier lists above remain under
+review and will be added here as they're confirmed.
+"""
+def apply_confirmed_correction(adlist, col, value, note):
+    for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
+        mask = frame['Ad List'] == adlist
+        if mask.any():
+            frame.loc[mask, col] = value
+            print(f"Ad List {adlist}: {col} -> {value} in {split_name} ({note})")
+            return
+    print(f"Ad List {adlist}: not found in X_train or X_test")
+
+"""
+Property Size: rule-based re-check of every row the Z-score screen above
+(fig06) flags, not a one-off patch for the 2 rows found so far - if a
+future data pull changes which rows are extreme, this rule still runs
+against whatever fig06 flags at that time. Priority order: an explicit
+'Land Area' label overrides a 'Built Up'/generic mention (the buyer-facing
+land size is preferred, e.g. Ad List 103792765's 9800 Built Up vs 6800 Land
+Area); otherwise a ~10x/100x/1000x ratio against the generic mention is a
+digit-shift extraction artefact (e.g. 122774 -> 1227.74, 14500 -> 1450);
+no description evidence at all drops the value to NaN (e.g. 103729938,
+'For sale' only); anything else means the description independently
+confirms the original value (e.g. 96973074, 9376 both sides), so it is
+left unchanged. Run against X_train AND X_test - X_test's own flagged list
+may be empty, but the rule still executes against it either way.
+"""
+LAND_AREA_PATTERN = re.compile(r'Land\s*Area\s*[:\-]?\s*(\d[\d,]*\.?\d*)\s*sq\.?\s*ft', re.IGNORECASE)
+
+def extract_size_with_source(text):
+    if pd.isna(text):
+        return np.nan, False
+    text = str(text)
+    m = LAND_AREA_PATTERN.search(text)
+    if m:
+        return float(m.group(1).replace(',', '')), True
+    m = SIZE_PATTERN.search(text)
+    return (float(m.group(1).replace(',', '')), False) if m else (np.nan, False)
+
+print("\n--- Property Size: description-based rule applied to Z-score outliers ---")
+for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
+    s = frame['Property Size'].dropna()
+    z = (s - s.mean()) / s.std()
+    flagged_idx = z.index[z.abs() > Z_THRESHOLD]
+    if len(flagged_idx) == 0:
+        print(f"{split_name}: no Property Size Z-score outliers - rule has no rows to apply to")
+        continue
+    # Cast to float first - a correction below may introduce NaN or a
+    # fractional value (e.g. 1227.74), neither of which fits the int64
+    # dtype Property Size was cast to back in 3.4.
+    frame['Property Size'] = frame['Property Size'].astype(float)
+    for idx in flagged_idx:
+        original = frame.loc[idx, 'Property Size']
+        desc_size, is_land_area = extract_size_with_source(frame.loc[idx, 'description'])
+        if pd.isna(desc_size):
+            corrected, note = np.nan, "no size evidence in description -> NaN"
+        elif is_land_area:
+            corrected, note = round(desc_size), f"Land Area preferred over Built Up ({original} -> {desc_size:.0f})"
+        else:
+            ratio = original / desc_size if pd.notna(original) and desc_size else np.nan
+            if pd.notna(ratio) and ratio > 0 and any(abs(ratio / p - 1) < 0.05 for p in [10, 100, 1000]):
+                corrected, note = round(desc_size), f"digit-shift artefact corrected ({original} -> {desc_size:.0f})"
+            else:
+                corrected, note = original, f"description confirms original value ({original}), no change"
+        frame.loc[idx, 'Property Size'] = corrected
+        print(f"Ad List {int(frame.loc[idx, 'Ad List'])} in {split_name}: {note}")
+
+"""
+Bedroom: rule-based re-check, but scoped to Bedroom >= 8 only - NOT the full
+Z-score outlier list (fig07 flags 37 rows in X_train alone, most of them
+ordinary 5-6 bedroom units). A blanket regex against the full list was tried
+and rejected here after producing false positives of exactly the kind
+already documented dataset-wide in notes/bedroom_bathroom_regex_false_
+positives.csv: (a) "SQFT : 3000\\nBEDROOMS : 6" - the earlier [\\s-]* pattern
+crossed the newline and grabbed the SQFT figure instead; (b) "4+1 bedroom"
+(a common Malaysian listing convention meaning 5 total) - the regex can only
+ever capture the "1" immediately before "bedroom", silently corrupting a
+correct value of 5. Restricting to >=8 keeps the scope to genuinely extreme,
+individually-checkable rows (2 in X_train: Ad List 96822478 and 102236931),
+and [^\\S\\n]* (whitespace but not newline) replaces the old \\s* so a match
+can no longer span two lines. Run against X_train AND X_test even though
+X_test's >=8 list may be empty - the loop still executes against it.
+"""
+BEDROOM_DESC_PATTERN = re.compile(r'(\d+)[^\S\n]*-?[^\S\n]*bed[^\S\n]*-?[^\S\n]*rooms?\b', re.IGNORECASE)
+
+def extract_bedroom_from_description(text):
+    if pd.isna(text):
+        return np.nan
+    m = BEDROOM_DESC_PATTERN.search(str(text))
+    return float(m.group(1)) if m else np.nan
+
+print("\n--- Bedroom: description-based rule applied to Bedroom >= 8 ---")
+for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
+    flagged_idx = frame.index[frame['Bedroom'] >= 8]
+    if len(flagged_idx) == 0:
+        print(f"{split_name}: no Bedroom >= 8 rows - rule has no rows to apply to")
+        continue
+    corrected_count = 0
+    for idx in flagged_idx:
+        original = frame.loc[idx, 'Bedroom']
+        desc_val = extract_bedroom_from_description(frame.loc[idx, 'description'])
+        adlist = int(frame.loc[idx, 'Ad List'])
+        if pd.isna(desc_val):
+            print(f"Ad List {adlist} in {split_name}: no bedroom count found in description, left unchanged ({original})")
+        elif desc_val != original:
+            print(f"Ad List {adlist} in {split_name}: Bedroom {original} -> {desc_val:.0f} (description states '{desc_val:.0f}-Bedrooms')")
+            frame.loc[idx, 'Bedroom'] = desc_val
+            corrected_count += 1
+        else:
+            print(f"Ad List {adlist} in {split_name}: description confirms original value ({original}), no change")
+    print(f"{split_name}: {corrected_count}/{len(flagged_idx)} Bedroom >= 8 rows corrected via description match")
+
+apply_confirmed_correction(103207012, 'Bathroom', 2,
+                            "description states '2 Bathrooms' in both unit configurations listed")
+
+"""
+Parking Lot: second-layer domain-knowledge filter on top of the Mahalanobis
+candidates above - many parking lots is only suspicious paired with a price
+far below what that many parking lots would normally command (Parking Lot
+and price are positively correlated, r=0.42 on X_train). ">=4" is the first
+integer past Parking Lot's own IQR upper bound (3.5, from the boxplot
+above); "50% of median" marks a price far enough under the X_train typical
+price that ordinary variation doesn't explain it. No independent source
+confirms the true count, so these become NaN (like Total Units==1 in 3.4),
+not a corrected value - deferred to 3.11 imputation. The threshold itself is
+computed from X_train's price median only and re-used as-is for X_test, so
+no test-set statistic leaks into the rule.
+"""
+parking_lot_price_threshold = price_train_raw.median() * 0.5
+print(f"\nParking Lot low-price threshold (50% of X_train median price): RM{parking_lot_price_threshold:,.0f}")
+for split_name, frame, price_series in [
+    ('X_train', X_train, price_train_raw),
+    ('X_test', X_test, np.exp(y_test)),
+]:
+    mask = (frame['Parking Lot'] >= 4) & (price_series < parking_lot_price_threshold)
+    if mask.any():
+        print(f"Parking Lot -> NaN in {split_name} (>=4 lots, price below threshold):")
+        review = frame.loc[mask, ['Ad List', 'Parking Lot']].copy()
+        review['price'] = price_series.loc[mask]
+        print(review.to_string(index=False))
+        frame.loc[mask, 'Parking Lot'] = np.nan
+    else:
+        print(f"Parking Lot -> NaN in {split_name}: no matching rows")
 
 # ============================================================
 # 3.8 Feature Engineering (moved after 3.11's split - every rule
