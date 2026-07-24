@@ -1075,6 +1075,37 @@ print(f"Facility names seen in X_test but not X_train (dropped, not encoded): {u
 print(f"\nX_train column totals:\n{facility_encoded_train.sum().sort_values(ascending=False)}")
 print("\n" + "-"*60)
 
+# ============================================================
+# EDA snapshot (train-only, post fixed-rule encoding, pre one-hot)
+# ============================================================
+# Section 4 (EDA) must not look at X_test (leakage) and must not use raw
+# houses_cleaned.csv (that's pre-split, includes test rows). This is the one
+# point in the pipeline where every fixed-rule 3.8/3.9 feature already
+# exists (Has_X amenity flags, Property Age, Listed_Facility_Count,
+# Is_Non_Bumi_Lot, Freehold Indicator, Floor_Range_Ordinal, facility
+# multi-hot) AND State/Property Type are still plain text - the two
+# fit-on-X_train one-hot encodings below haven't run yet.
+print("\n--- EDA snapshot (train-only, engineered, pre one-hot) ---")
+eda_cols_to_drop = [
+    'description', 'Ad List',
+    'Nearby School', 'Nearby Mall', 'Nearby Railway Station',
+    'Category', 'Firm Type', 'Firm Number', 'REN Number',
+    'Building Name', 'Developer',
+    'Address', 'Completion Year',
+    'Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station',
+    'Facilities',
+    # Tenure Type, Land Title, Floor Range, State, Property Type deliberately
+    # kept as text for EDA (clean categories, readable axis labels) even
+    # though each has a derived numeric column too (Freehold Indicator,
+    # Is_Non_Bumi_Lot, Floor_Range_Ordinal, and State/Property Type's
+    # one-hot below) - Facilities is different: it's free-text, not a clean
+    # category, so only its Has_* multi-hot form is kept.
+]
+eda_train = X_train.drop(columns=eda_cols_to_drop).copy()
+eda_train['price'] = np.exp(y_train)
+eda_train.to_csv(os.path.join(PROCESSED_DIR, "train_for_eda.csv"), index=False)
+print(f"train_for_eda.csv saved: {eda_train.shape}")
+
 print("\n--- State: rare-category merge + one-hot encoding (fit on X_train only) ---")
 
 """
