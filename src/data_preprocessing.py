@@ -7,7 +7,7 @@ import joblib
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
 import seaborn as sns
-from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
+from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.model_selection import train_test_split
 from scipy.stats import chi2
 
@@ -468,7 +468,7 @@ Split happens before feature engineering (3.8), categorical encoding (3.9)
 and feature selection (3.7) - not after, as in an earlier version of this
 pipeline - so every statistic-fitting step in those sections (rare-category
 merge thresholds, one-hot category lists, the Facilities vocabulary, the
-missing-value imputation medians, 3.10's scaler) can be fit on X_train only
+missing-value imputation medians) can be fit on X_train only
 and applied to X_test, without having to specially reorder any one of them
 ahead of the split.
 
@@ -1092,7 +1092,7 @@ The <10-listings rare-category threshold IS a fitted statistic (unlike the
 fill above, it depends on which categories are common enough to keep), so
 it's computed from X_train's value_counts() ONLY, then the same rare-category
 list is applied to X_test's State column - the same leakage rule used for
-the imputation medians below and 3.10's scaler.
+the imputation medians below.
 
 X_test's State is cast to a Categorical using X_train's post-merge category
 list (not encoded independently) - this guarantees get_dummies drops the
@@ -1326,58 +1326,54 @@ print("\n" + "="*60)
 print("STEP 3.10: FEATURE SCALING")
 print("="*60)
 
-print("\n--- StandardScaler, fit on X_train only ---")
+print("\n--- Log transform (log1p), applied identically to X_train and X_test ---")
 
 """
-StandardScaler (not MinMaxScaler) - this dataset has genuine extreme values
-(e.g. Total Units up to several thousand), and min-max scaling would let a
-single outlier compress the entire rest of the distribution into a tiny
-range. StandardScaler's mean/std are less distorted by a few extreme points.
+Log scale (np.log1p) instead of StandardScaler - this dataset has genuine
+extreme values (e.g. Total Units up to several thousand) and heavily
+right-skewed distributions, and log1p compresses that long tail directly at
+the source rather than just re-centring a mean/std that's itself distorted
+by the skew.
 
-Only genuinely continuous/count numeric columns are scaled, plus
+log1p (log(1+x)), not log(x), because these columns can legitimately be 0
+(e.g. Parking Lot, Property Age, Listed_Facility_Count) and log(0) is
+undefined.
+
+Only genuinely continuous/count numeric columns are transformed, plus
 Floor_Range_Ordinal - price is the target, not a feature, so it's excluded
 entirely. One-hot columns (State_*/PropertyType_*) and binary flags
 (Has_*/Is_Non_Bumi_Lot/Freehold Indicator/the imputation *_Missing flags)
-are left unscaled (already bounded 0/1, scaling a dummy isn't meaningful).
-Floor_Range_Ordinal is included in scaling, though it
-only has 3 levels - it has a real magnitude and order (1<2<3), not just
-presence/absence, so leaving it on a raw 1-3 scale while every other numeric
-feature is standardised to mean=0/std=1 would let it disproportionately
-dominate or shrink in a distance-based model (KNN/SVR) purely from a unit
-mismatch, unrelated to its actual importance.
+are left as-is (already bounded 0/1, log-transforming a dummy isn't
+meaningful).
 
-scaler.fit() is called on X_train ONLY, then the same fitted scaler
-transforms both X_train and X_test - X_test's own mean/std are never
-computed or used, which is what avoids leaking test-set information into
-the model's input scale.
+Unlike StandardScaler, log1p has no fitted parameters (no mean/std learned
+from data), so there's no train-only "fit" step - it's applied identically
+to X_train and X_test, and no leakage risk to guard against here.
 """
 SCALE_COLS = ['Bedroom', 'Bathroom', 'Property Size', '# of Floors',
               'Total Units', 'Parking Lot', 'Property Age', 'Listed_Facility_Count',
               'Floor_Range_Ordinal']
 
-scaler = StandardScaler()
-X_train[SCALE_COLS] = scaler.fit_transform(X_train[SCALE_COLS])
-X_test[SCALE_COLS] = scaler.transform(X_test[SCALE_COLS])
+X_train[SCALE_COLS] = np.log1p(X_train[SCALE_COLS])
+X_test[SCALE_COLS] = np.log1p(X_test[SCALE_COLS])
 
-print(f"Columns scaled ({len(SCALE_COLS)}): {SCALE_COLS}")
-print(f"\nX_train[SCALE_COLS] post-scaling summary (mean should be ~0, std ~1):")
+print(f"Columns log-transformed ({len(SCALE_COLS)}): {SCALE_COLS}")
+print(f"\nX_train[SCALE_COLS] post-transform summary:")
 print(X_train[SCALE_COLS].describe().loc[['mean', 'std']])
-print(f"\nX_test[SCALE_COLS] post-scaling summary (mean/std need NOT be exactly 0/1 -")
-print(f"it's transformed with X_train's scaler, not its own):")
+print(f"\nX_test[SCALE_COLS] post-transform summary:")
 print(X_test[SCALE_COLS].describe().loc[['mean', 'std']])
 
 """
 Saved under _scaled filenames, not overwriting the imputation step's
 X_train.csv/X_test.csv - tree-based models (Decision Tree/Random Forest/
-Gradient Boosting) don't need scaling and can use that unscaled-but-imputed
-version directly, without having to invert this transform to get back the
-original values.
+Gradient Boosting) don't need this transform and can use that
+untransformed-but-imputed version directly. No scaler object to persist
+here (log1p is stateless), unlike the StandardScaler version this replaced.
 """
 X_train.to_csv(os.path.join(PROCESSED_DIR, "X_train_scaled.csv"), index=False)
 X_test.to_csv(os.path.join(PROCESSED_DIR, "X_test_scaled.csv"), index=False)
 joblib.dump((X_train, X_test, y_train, y_test), os.path.join(PROCESSED_DIR, "train_test_split_scaled.pkl"))
-joblib.dump(scaler, os.path.join(PROCESSED_DIR, "scaler.pkl"))
-print(f"\nSaved scaled X_train_scaled/X_test_scaled (unscaled X_train.csv/X_test.csv left untouched) to {PROCESSED_DIR}")
+print(f"\nSaved log-transformed X_train_scaled/X_test_scaled (untransformed X_train.csv/X_test.csv left untouched) to {PROCESSED_DIR}")
 
 # ============================================================
 # 3.12 Final Dataset Structure Summary
