@@ -404,62 +404,29 @@ print("\n" + "="*60)
 print("STEP 3.5: MISSING-VALUE HANDLING")
 print("="*60)
 
-missing_before_35 = df.isna().sum()
+"""
+No direct action taken in this section currently. The only case this section
+was ever written to handle - Bedroom/Bathroom missing values recovered from
+the listing description - can no longer occur: the single row that had them
+(Ad List 103803053) also had Property Type == 'Others' and is already
+removed by Section 3.2.2, which now runs before this section. See
+docs/notes_bedroom_bathroom_recovery.md (git history) for that prior case.
 
-# Recover from description (same evidence-based approach as 3.4) instead of a
-# blanket median. Generic regex, not hardcoded to the one row it currently matches.
-BEDROOM_PATTERN = re.compile(r'(\d+)\s*bed\s*rooms?\b', re.IGNORECASE)
-BATHROOM_PATTERN = re.compile(r'(\d+)\s*bath\s*rooms?\b', re.IGNORECASE)
+Floor Range / Completion Year / # of Floors / Total Units / Parking Lot:
+median/mode + missing-indicator imputation is deferred to the 3.11
+modelling pipeline (fit on X_train only) to avoid test-set leakage. Left
+as real NaN here for EDA.
 
-def extract_room_count(text, pattern):
-    if pd.isna(text):
-        return np.nan
-    match = pattern.search(str(text))
-    return float(match.group(1)) if match else np.nan
-
-room_recovery_log = []
-for col, pattern in [('Bedroom', BEDROOM_PATTERN), ('Bathroom', BATHROOM_PATTERN)]:
-    for idx in df.index[df[col].isna()]:
-        recovered = extract_room_count(df.loc[idx, 'description'], pattern)
-        room_recovery_log.append({
-            "Ad List": df.loc[idx, 'Ad List'],
-            "Variable": col,
-            "Original": np.nan,
-            "Description evidence": recovered,
-            "Final": recovered,
-        })
-        if pd.notna(recovered):
-            df.loc[idx, col] = recovered
-
-room_recovery_df = pd.DataFrame(room_recovery_log)
-print("\n--- Bedroom / Bathroom recovery from description ---")
-if room_recovery_df.empty:
-    print("No missing Bedroom/Bathroom values found.")
-else:
-    print(room_recovery_df.to_string(index=False))
-
-# Floor Range / Completion Year / # of Floors / Total Units / Parking Lot:
-# median/mode + missing-indicator imputation is deferred to the 3.11
-# modelling pipeline (fit on X_train only) to avoid test-set leakage. Left
-# as real NaN here for EDA.
-
-# Columns deferred to 3.7 (dropped) / 3.8 (transformed) are documented in
-# notes_missing_value_decision_audit.md.
-
-missing_after_35 = df.isna().sum()
-change_summary = pd.DataFrame({
-    "missing_before_3.5": missing_before_35,
-    "missing_after_3.5": missing_after_35,
-})
-print("\n--- Missing count before vs after Section 3.5's direct actions ---")
-print(change_summary[(change_summary["missing_before_3.5"] > 0) | (change_summary["missing_after_3.5"] > 0)])
+Columns deferred to 3.7 (dropped) / 3.8 (transformed) are documented in
+notes_missing_value_decision_audit.md.
+"""
 
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
 joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 
 # ============================================================
-# 3.11 Train-Test Split (moved ahead of 3.7/3.8/3.9 and ahead of 3.6 -
+# 3.6 Train-Test Split (moved ahead of 3.7/3.8/3.9 and ahead of 3.6 -
 # executed
 # immediately after 3.6, before any feature engineering, encoding
 # or selection, so every fit-dependent step below can be fit on
@@ -524,7 +491,7 @@ in 3.12's summary table ("Row-identical groups split across train/test").
 """
 
 # ============================================================
-# 3.6 Outlier Treatment (moved after 3.11's split - boxplot, Z-score and
+# 3.7 Outlier Treatment (moved after 3.11's split - boxplot, Z-score and
 # Mahalanobis distance statistics are all fit on X_train only, the same
 # leakage rule every other fit-dependent step in this pipeline follows.
 # Detection/visualisation only - no correction is applied in this section
@@ -630,14 +597,6 @@ def mahalanobis_figure(pair_df, xcol, ycol, title, filename):
     print(f"Outliers flagged: {outlier.sum()} / {len(pair)}")
     return pair.index[outlier]
 
-print("\n--- Total Units vs # of Floors: Mahalanobis Distance ---")
-tu_outlier_idx = mahalanobis_figure(
-    X_train[['Total Units', '# of Floors']], '# of Floors', 'Total Units',
-    "Total Units vs # of Floors", "fig09_units_floors_mahalanobis.png"
-)
-print("Outlier Ad List (for manual review, no correction applied yet):")
-print(X_train.loc[tu_outlier_idx, ['Ad List', 'Total Units', '# of Floors']].to_string(index=False))
-
 print("\n--- Parking Lot vs price: Mahalanobis Distance ---")
 # y_train is log(price) (see 3.11 above) - converted back to RM here for interpretability.
 price_train_raw = np.exp(y_train)
@@ -651,22 +610,6 @@ pl_review['price'] = price_train_raw.loc[pl_outlier_idx]
 print(pl_review.to_string(index=False))
 
 print("\n--- Confirmed corrections (manually reviewed against description) ---")
-
-"""
-Applied directly to whichever of X_train/X_test the row falls in - these are
-description-verified facts (not a fitted statistic like a median or an IQR
-bound), so there is no train/test leakage concern in correcting both splits
-the same way. More candidates from the outlier lists above remain under
-review and will be added here as they're confirmed.
-"""
-def apply_confirmed_correction(adlist, col, value, note):
-    for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
-        mask = frame['Ad List'] == adlist
-        if mask.any():
-            frame.loc[mask, col] = value
-            print(f"Ad List {adlist}: {col} -> {value} in {split_name} ({note})")
-            return
-    print(f"Ad List {adlist}: not found in X_train or X_test")
 
 """
 Property Size: rule-based re-check of every row the Z-score screen above
@@ -696,9 +639,18 @@ def extract_size_with_source(text):
     return (float(m.group(1).replace(',', '')), False) if m else (np.nan, False)
 
 print("\n--- Property Size: description-based rule applied to Z-score outliers ---")
+
+# Z-score threshold (mean/std) is fit on X_train only and re-used as-is for
+# X_test - same leakage rule the Parking Lot rule below already follows.
+# Only the outlier-detection threshold is train-fit; the actual correction
+# for each flagged row still comes from that row's own description (not a
+# fitted statistic), so there is no leakage in that half of the rule.
+train_size_mean = X_train['Property Size'].dropna().mean()
+train_size_std = X_train['Property Size'].dropna().std()
+
 for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
     s = frame['Property Size'].dropna()
-    z = (s - s.mean()) / s.std()
+    z = (s - train_size_mean) / train_size_std
     flagged_idx = z.index[z.abs() > Z_THRESHOLD]
     if len(flagged_idx) == 0:
         print(f"{split_name}: no Property Size Z-score outliers - rule has no rows to apply to")
@@ -724,52 +676,55 @@ for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
         print(f"Ad List {int(frame.loc[idx, 'Ad List'])} in {split_name}: {note}")
 
 """
-Bedroom: rule-based re-check, but scoped to Bedroom >= 8 only - NOT the full
-Z-score outlier list (fig07 flags 37 rows in X_train alone, most of them
-ordinary 5-6 bedroom units). A blanket regex against the full list was tried
-and rejected here after producing false positives of exactly the kind
-already documented dataset-wide in notes/bedroom_bathroom_regex_false_
-positives.csv: (a) "SQFT : 3000\\nBEDROOMS : 6" - the earlier [\\s-]* pattern
-crossed the newline and grabbed the SQFT figure instead; (b) "4+1 bedroom"
-(a common Malaysian listing convention meaning 5 total) - the regex can only
-ever capture the "1" immediately before "bedroom", silently corrupting a
-correct value of 5. Restricting to >=8 keeps the scope to genuinely extreme,
-individually-checkable rows (2 in X_train: Ad List 96822478 and 102236931),
-and [^\\S\\n]* (whitespace but not newline) replaces the old \\s* so a match
-can no longer span two lines. Run against X_train AND X_test even though
-X_test's >=8 list may be empty - the loop still executes against it.
+Bedroom / Bathroom: rule-based re-check, scoped to >=8 only - NOT the full
+Z-score outlier list (fig07/fig08 flag 37/71 rows in X_train alone, most of
+them ordinary 5-6 bedroom / 2-3 bathroom units). A blanket regex against the
+full list was tried and rejected here after producing false positives of
+exactly the kind already documented dataset-wide in notes/bedroom_bathroom_
+regex_false_positives.csv: (a) "SQFT : 3000\\nBEDROOMS : 6" - the earlier
+[\\s-]* pattern crossed the newline and grabbed the SQFT figure instead; (b)
+"4+1 bedroom" (a common Malaysian listing convention meaning 5 total) - the
+regex can only ever capture the "1" immediately before "bedroom", silently
+corrupting a correct value of 5. Restricting to >=8 keeps the scope to
+genuinely extreme, individually-checkable rows, and [^\\S\\n]* (whitespace
+but not newline) replaces the old \\s* so a match can no longer span two
+lines. Both variables use the same >=8 threshold and the same rule shape -
+Bathroom used to be a single hardcoded correction (Ad List 103207012), but
+its one flagged row is handled identically by this generalised rule, so the
+one-off version was replaced rather than kept alongside it. Run against
+X_train AND X_test even though either split's >=8 list may be empty - the
+loop still executes against it.
 """
 BEDROOM_DESC_PATTERN = re.compile(r'(\d+)[^\S\n]*-?[^\S\n]*bed[^\S\n]*-?[^\S\n]*rooms?\b', re.IGNORECASE)
+BATHROOM_DESC_PATTERN = re.compile(r'(\d+)[^\S\n]*-?[^\S\n]*bath[^\S\n]*-?[^\S\n]*rooms?\b', re.IGNORECASE)
 
-def extract_bedroom_from_description(text):
+def extract_room_count_from_description(text, pattern):
     if pd.isna(text):
         return np.nan
-    m = BEDROOM_DESC_PATTERN.search(str(text))
+    m = pattern.search(str(text))
     return float(m.group(1)) if m else np.nan
 
-print("\n--- Bedroom: description-based rule applied to Bedroom >= 8 ---")
-for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
-    flagged_idx = frame.index[frame['Bedroom'] >= 8]
-    if len(flagged_idx) == 0:
-        print(f"{split_name}: no Bedroom >= 8 rows - rule has no rows to apply to")
-        continue
-    corrected_count = 0
-    for idx in flagged_idx:
-        original = frame.loc[idx, 'Bedroom']
-        desc_val = extract_bedroom_from_description(frame.loc[idx, 'description'])
-        adlist = int(frame.loc[idx, 'Ad List'])
-        if pd.isna(desc_val):
-            print(f"Ad List {adlist} in {split_name}: no bedroom count found in description, left unchanged ({original})")
-        elif desc_val != original:
-            print(f"Ad List {adlist} in {split_name}: Bedroom {original} -> {desc_val:.0f} (description states '{desc_val:.0f}-Bedrooms')")
-            frame.loc[idx, 'Bedroom'] = desc_val
-            corrected_count += 1
-        else:
-            print(f"Ad List {adlist} in {split_name}: description confirms original value ({original}), no change")
-    print(f"{split_name}: {corrected_count}/{len(flagged_idx)} Bedroom >= 8 rows corrected via description match")
-
-apply_confirmed_correction(103207012, 'Bathroom', 2,
-                            "description states '2 Bathrooms' in both unit configurations listed")
+for col, pattern in [('Bedroom', BEDROOM_DESC_PATTERN), ('Bathroom', BATHROOM_DESC_PATTERN)]:
+    print(f"\n--- {col}: description-based rule applied to {col} >= 8 ---")
+    for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
+        flagged_idx = frame.index[frame[col] >= 8]
+        if len(flagged_idx) == 0:
+            print(f"{split_name}: no {col} >= 8 rows - rule has no rows to apply to")
+            continue
+        corrected_count = 0
+        for idx in flagged_idx:
+            original = frame.loc[idx, col]
+            desc_val = extract_room_count_from_description(frame.loc[idx, 'description'], pattern)
+            adlist = int(frame.loc[idx, 'Ad List'])
+            if pd.isna(desc_val):
+                print(f"Ad List {adlist} in {split_name}: no {col.lower()} count found in description, left unchanged ({original})")
+            elif desc_val != original:
+                print(f"Ad List {adlist} in {split_name}: {col} {original} -> {desc_val:.0f} (description states '{desc_val:.0f}-{col}s')")
+                frame.loc[idx, col] = desc_val
+                corrected_count += 1
+            else:
+                print(f"Ad List {adlist} in {split_name}: description confirms original value ({original}), no change")
+        print(f"{split_name}: {corrected_count}/{len(flagged_idx)} {col} >= 8 rows corrected via description match")
 
 """
 Parking Lot: second-layer domain-knowledge filter on top of the Mahalanobis
@@ -1216,10 +1171,7 @@ print("\n" + "-"*60)
 print(f"\nX_train shape after 3.9: {X_train.shape} | X_test shape after 3.9: {X_test.shape}")
 
 # ============================================================
-# 3.7 Feature Selection (executed after 3.8/3.9, since it drops
-# columns that 3.8/3.9 needed to still exist while extracting
-# from them - applied to X_train/X_test independently using the
-# same fixed column lists on each side)
+# 3.10 Feature Selection
 # ============================================================
 print("\n" + "="*60)
 print("STEP 3.7: FEATURE SELECTION")
@@ -1289,8 +1241,7 @@ print(f"Columns dropped: {len(cols_no_engineering) + len(cols_replaced_by_engine
 print("\n" + "-"*60)
 
 # ============================================================
-# Missing-value imputation (median fill, fit on X_train only and
-# applied to X_test - executed after 3.7's drop)
+# 3.11 Missing-value imputation
 # ============================================================
 print("\n" + "="*60)
 print("MISSING-VALUE IMPUTATION")
@@ -1360,9 +1311,7 @@ joblib.dump((X_train, X_test, y_train, y_test), os.path.join(MODELLING_DIR, "tra
 print(f"\nSaved X_train/X_test/y_train/y_test to {MODELLING_DIR}")
 
 # ============================================================
-# 3.10 Feature Scaling (executed after imputation, using only
-# X_train to fit, so no test-set information leaks into the
-# scaling statistics)
+# Feature Scaling
 # ============================================================
 print("\n" + "="*60)
 print("STEP 3.10: FEATURE SCALING")
@@ -1509,3 +1458,5 @@ summary_table = pd.DataFrame({
     ]
 })
 print(summary_table.to_string(index=False))
+
+print(df['Property Type'].value_counts())
