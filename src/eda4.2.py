@@ -1,18 +1,3 @@
-"""
-4.2 Univariate Analysis
-4.2.1 Continuous Numerical Variables - Property Size (sq.ft.)
-4.2.2 Discrete Numerical Variables - Bedroom, Bathroom, Parking Lot
-
-Follows the same shared-directory convention as data_preprocessing.py:
-- EDA_DIR holds train_for_eda.csv (written by data_preprocessing.py),
-  every diagram produced across ALL of Section 4.2's subsections, and
-  eda_results.xlsx - the shared workbook for ALL of Section 4.2's
-  calculated tables. Each subsection writes to its own sheet(s) only
-  (if_sheet_exists='replace'), so rerunning one subsection never touches
-  another's sheets - same isolation principle as CLEANING_FIGURES_DIR
-  collecting figures from every step of the cleaning pipeline without
-  one step overwriting another's output.
-"""
 
 import os
 import pandas as pd
