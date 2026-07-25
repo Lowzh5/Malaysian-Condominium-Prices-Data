@@ -26,4 +26,5 @@ data/modelling/*.pkl
 data/modelling/*.csv
 data/eda/*.csv
 data/eda/*.png
+data/eda/*.xlsx
 data/cleaning_figures/*.png
