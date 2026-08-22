@@ -18,9 +18,8 @@ csv_path = os.path.join(BASE_DIR, "data", "raw", "houses.csv")
 df = pd.read_csv(csv_path)
 RAW_COLUMNS = list(df.columns)  # snapshot for 3.12's summary - kept vs dropped vs engineered
 
-# CLEANING_FIGURES_DIR holds diagnostic plots from the cleaning pipeline
-# (missing-value map, outlier detection) - separate from EDA_DIR, which is
-# the 4.0 EDA report's own output (train_for_eda.csv + its figures).
+# CLEANING_FIGURES_DIR: diagnostic plots from the cleaning pipeline.
+# EDA_DIR: Section 4's own output (train_for_eda.csv + its figures).
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 EXTRA_DIR = os.path.join(BASE_DIR, "data", "extra")
 MODELLING_DIR = os.path.join(BASE_DIR, "data", "modelling")
@@ -33,8 +32,10 @@ os.makedirs(EDA_DIR, exist_ok=True)
 os.makedirs(CLEANING_FIGURES_DIR, exist_ok=True)
 
 # ============================================================
-# Step 0 — Review (observe only, no changes made)
+# Dataset Review
 # ============================================================
+# Observe-only pass over the raw dataset: shape, dtypes, sample rows,
+# uniqueness, and exact duplicate count. No changes made here.
 print("="*60)
 print("STEP 0: DATASET REVIEW")
 print("="*60)
@@ -51,6 +52,8 @@ print(f"Exact duplicate rows: {df.duplicated().sum()}")
 # ============================================================
 # 3.1 Missing Value Standardisation
 # ============================================================
+# Detects non-standard missing-value placeholders (e.g. '-') and converts
+# them all to a single NaN representation.
 print("\n" + "="*60)
 print("STEP 3.1: MISSING VALUE STANDARDISATION")
 print("="*60)
@@ -99,23 +102,28 @@ ax.bar_label(bars, labels=[f"{c} ({p}%)" for c, p in zip(missing_cols["missing_c
              padding=3, fontsize=8)
 plt.tight_layout()
 plt.savefig(os.path.join(CLEANING_FIGURES_DIR, "fig01_missing_bar.png"), dpi=150, bbox_inches="tight")
-plt.close()
 
 # ============================================================
 # 3.2.1 Duplicate Removal
 # ============================================================
+"""
+Removes exact duplicate rows, then resolves duplicated Ad List groups by
+keeping the most complete record per group. Also reports (without
+removing) near-duplicate re-listings that share every field except Ad
+List/description.
+"""
 print("\n" + "="*60)
 print("STEP 3.2.1: DUPLICATE HANDLING")
 print("="*60)
 
 shape_before = df.shape[0]
 
-# Stage 1 — exact duplicates
+# Stage 1 - exact duplicates
 exact_dup_count = df.duplicated().sum()
 df = df.drop_duplicates()
 shape_after_exact = df.shape[0]
 
-# Stage 2 — duplicated Ad List: a repeated ID means the same ad was captured twice.
+# Stage 2 - duplicated Ad List: a repeated ID means the same ad was captured twice.
 dup_adlist_mask = df['Ad List'].duplicated(keep=False)
 dup_groups = df.loc[dup_adlist_mask, 'Ad List'].unique()
 rows_in_dup_groups = dup_adlist_mask.sum()
@@ -148,7 +156,7 @@ before_merge_snapshot.insert(0, 'stage', 'before')
 # Keep the most complete record per Ad List group instead of an arbitrary first row.
 df['_completeness'] = df.notna().sum(axis=1)
 df = df.sort_values(['Ad List', '_completeness'], ascending=[True, False], kind='stable')
-df = df.groupby('Ad List', as_index=False, sort=False).first() 
+df = df.groupby('Ad List', as_index=False, sort=False).first()
 df = df.drop(columns='_completeness')
 shape_after_adlist = df.shape[0]
 rows_removed_by_merge = rows_in_dup_groups - len(dup_groups)
@@ -172,8 +180,7 @@ comparison_df = comparison_df.sort_values(['Ad List', 'stage'])
 comparison_df.to_csv(os.path.join(EXTRA_DIR, "adlist_merge_before_after.csv"), index=False)
 print(f"\nBefore/after merge comparison saved to {EXTRA_DIR}\\adlist_merge_before_after.csv")
 
-# Stage 3 — near-duplicate re-listings: same content, different Ad List
-# (likely re-listed over time, not a collection error).
+# Stage 3 - near-duplicate re-listings: same content, different Ad List.
 print("\n--- Supplementary check: re-listings ignoring Ad List / description ---")
 ignore_cols = ['Ad List', 'description']
 check_cols = [c for c in df.columns if c not in ignore_cols]
@@ -184,19 +191,11 @@ print("listing events, not duplicate scrapes of the same ad. Likely represents")
 print("re-listing of the same property over time. Retained (not removed) as")
 print("there is no evidence this is a data collection error.")
 
-# near_dup_count above (25) counts DUPLICATE ROWS under pandas' default
-# keep='first' - every row in a group except its first occurrence. Grouping
-# the same rows by check_cols instead counts GROUPS, a different unit: 23
-# groups covering 48 rows total (48 - 23 = 25, so the two numbers agree,
-# they just measure rows-beyond-the-first vs. groups).
 near_dup_mask = df.duplicated(subset=check_cols, keep=False)
 near_dup_df = df.loc[near_dup_mask].copy()
 group_ids = near_dup_df.groupby(check_cols, dropna=False, sort=False).ngroup()
 near_dup_df.insert(0, 'group_id', group_ids)
 
-# Verify the premise: within each group, does 'description' actually differ,
-# or does it also happen to match (making the pair closer to an exact
-# duplicate that only differs by Ad List)?
 near_dup_df.insert(1, 'description_identical', near_dup_df.groupby('group_id')['description']
                     .transform(lambda s: s.nunique(dropna=False) <= 1))
 near_dup_df = near_dup_df.sort_values(['group_id', 'Ad List'], kind='stable')
@@ -211,17 +210,14 @@ print(f"Saved to {EXTRA_DIR}\\near_duplicate.csv")
 # ============================================================
 # 3.2.2 Unrelated Row Removal
 # ============================================================
+"""
+Removes rows with Property Type == 'Others' - not a real property
+category, out of scope for this project.
+"""
 print("\n" + "="*60)
 print("STEP 3.2.2: UNRELATED ROW REMOVAL")
 print("="*60)
 
-"""
-Property Type == 'Others' is a catch-all label that doesn't identify a real
-condominium/apartment-family property type, unlike the other 7 categories
-(Condominium, Apartment, Service Residence, Flat, Studio, Duplex, Townhouse
-Condo). Since this project analyses condominium prices specifically, these
-rows are out of scope - removed as unrelated records, not a data quality fix.
-"""
 shape_before_unrelated = df.shape[0]
 other_count = (df['Property Type'] == 'Others').sum()
 
@@ -232,20 +228,21 @@ print(f"Rows with Property Type == 'Others': {other_count}")
 print(f"Rows before removal (end of 3.2.1): {shape_before_unrelated}")
 print(f"Rows after removing Property Type == 'Others': {shape_after_unrelated}")
 
+df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
+joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
+print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
+
+# ============================================================
+# 3.2.3 Rare Property Type Removal
+# ============================================================
 """
-Duplex / Studio / Townhouse Condo each have fewer than 20 listings (out of
-~3800) - too few samples for a stable price estimate per type. One-hot
-columns built from these would carry high-variance, unreliable
-coefficients, and merging them into a single 'Other' bucket at encoding
-time doesn't fix that either: the three types are price-wise dissimilar
-(studio vs. duplex vs. townhouse), so the merged bucket itself ends up with
-inflated within-group price std. Removed as rows here instead, before the
-split, so every downstream fit-on-X_train step (outlier stats, imputation
-medians) is computed on the reduced dataset automatically. With these three
-gone, every remaining Property Type (Condominium/Apartment/Service
-Residence/Flat) has hundreds+ listings, so 3.9's Property Type encoding no
-longer needs a rare-category merge step at all - see 3.9 below.
+Removes Duplex/Studio/Townhouse Condo rows - each has too few listings
+for a stable one-hot category once encoded.
 """
+print("\n" + "="*60)
+print("STEP 3.2.3: RARE PROPERTY TYPE REMOVAL")
+print("="*60)
+
 RARE_PROPERTY_TYPES_TO_REMOVE = ['Duplex', 'Studio', 'Townhouse Condo']
 shape_before_rare_removal = df.shape[0]
 rare_type_count = df['Property Type'].isin(RARE_PROPERTY_TYPES_TO_REMOVE).sum()
@@ -264,6 +261,10 @@ print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 # ============================================================
 # 3.3 Data Type Conversion
 # ============================================================
+"""
+Converts price/Property Size (text with units/currency symbols) and the
+remaining numeric-looking columns into proper numeric dtypes.
+"""
 print("\n" + "="*60)
 print("STEP 3.3: DATA TYPE CONVERSION")
 print("="*60)
@@ -290,8 +291,7 @@ df['price'] = convert_and_report(
     "Remove 'RM' prefix and internal spaces, then convert to numeric"
 )
 
-# Extract the number preceding "sq.ft." — stripping non-numeric chars would
-# corrupt values like "1000.." from the unit's own periods.
+# Extract the number preceding "sq.ft."
 df['Property Size'] = convert_and_report(
     'Property Size',
     lambda s: pd.to_numeric(
@@ -329,6 +329,11 @@ print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 # ============================================================
 # 3.4 Invalid Value Correction
 # ============================================================
+"""
+Corrects/flags physically implausible values: Property Size cross-checked
+against the listing description, a scraping artefact removed from
+Facilities, and unrealistic # of Floors values set to NaN.
+"""
 print("\n" + "="*60)
 print("STEP 3.4: INVALID VALUE CORRECTION")
 print("="*60)
@@ -340,15 +345,6 @@ size_p1_threshold = df['Property Size'].quantile(0.01)
 print(f"1st percentile threshold: {size_p1_threshold:.1f} sq.ft.")
 print(df.loc[df['Property Size'] <= size_p1_threshold, ['Ad List', 'Property Size']].to_string(index=False))
 
-"""
-Property Size is cross-checked against the 'sq.ft' figure independently
-stated in the description. Ad List 103788197 (1 sq.ft.) and 103423738
-(9 sq.ft.) are the two rows the bottom 1% scan above surfaces as
-physically impossible - a plain extraction failure, not a real property
-size. Targeted directly by Ad List (same reasoning as the Facilities '10'
-fix below): the bottom 1% scan already confirms these are the only two
-affected rows, so no blanket below-threshold scan is needed.
-"""
 SIZE_PATTERN = re.compile(
     r'(\d[\d,]*\.?\d*)\s*(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)(?!\w)',
     re.IGNORECASE
@@ -385,14 +381,6 @@ print("\n" + "-"*60)
 
 print("\n--- Facilities: remove scraping artefact '10' ---")
 
-"""
-Ad List 95706905's Facilities value ends in a stray "10" - not a real
-facility name, a scraping artefact. Confirmed unique to this one row (every
-row's comma-separated Facilities items were checked for a standalone
-digit-only token; no other row has this issue), so the fix targets this Ad
-List directly rather than a blanket rule, and only removes the "10" token,
-not the row.
-"""
 FACILITIES_FIX_ADLIST = 95706905
 old_facilities = df.loc[df['Ad List'] == FACILITIES_FIX_ADLIST, 'Facilities'].iloc[0]
 new_facilities = re.sub(r',\s*10\s*$', '', old_facilities)
@@ -402,13 +390,6 @@ print(f"  Before: {old_facilities}")
 print(f"  After:  {new_facilities}")
 print("\n" + "-"*60)
 
-# No independent field verifies floor count, so any generic round-number
-# cutoff works as a screen. Malaysia's tallest building (Merdeka 118, 118
-# storeys) is no longer used as the benchmark - 78 is used instead as a
-# plain threshold not tied to any specific building. The data has a natural
-# gap between the highest plausible value (63) and the next value up (135),
-# so 78 and 118 flag the exact same rows today; the lower threshold is what
-# keeps this screen meaningful if a future data pull adds values in between.
 FLOOR_MAX = 78
 floor_invalid_mask = df['# of Floors'] > FLOOR_MAX
 print(f"\n'# of Floors' > {FLOOR_MAX} (unlikely): {floor_invalid_mask.sum()}")
@@ -425,63 +406,33 @@ print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 # ============================================================
 # 3.5 Missing-value Handling
 # ============================================================
+"""
+No direct action taken here now (the one case this section used to
+handle no longer occurs after 3.2.2 runs first). Remaining missing
+values are deferred to 3.11.1's fit-on-X_train imputation.
+"""
 print("\n" + "="*60)
 print("STEP 3.5: MISSING-VALUE HANDLING")
 print("="*60)
-
-"""
-No direct action taken in this section currently. The only case this section
-was ever written to handle - Bedroom/Bathroom missing values recovered from
-the listing description - can no longer occur: the single row that had them
-(Ad List 103803053) also had Property Type == 'Others' and is already
-removed by Section 3.2.2, which now runs before this section. See
-docs/notes_bedroom_bathroom_recovery.md (git history) for that prior case.
-
-Floor Range / Completion Year / # of Floors / Total Units / Parking Lot:
-median/mode + missing-indicator imputation is deferred to the 3.11.1
-modelling pipeline (fit on X_train only) to avoid test-set leakage. Left
-as real NaN here for EDA.
-
-Columns deferred to 3.10 (dropped) / 3.8 (transformed) are documented in
-notes_missing_value_decision_audit.md.
-"""
 
 df.to_csv(os.path.join(PROCESSED_DIR, "houses_cleaned.csv"), index=False)
 joblib.dump(df, os.path.join(PROCESSED_DIR, "houses_cleaned.pkl"))
 print(f"\nSaved to {PROCESSED_DIR}: {df.shape}")
 
 # ============================================================
-# 3.6 Train-Test Split (moved ahead of 3.7/3.8/3.9/3.10 - executed
-# immediately after 3.5, before any outlier treatment, feature
-# engineering, encoding or selection, so every fit-dependent step
-# below can be fit on X_train only and simply applied to X_test)
+# 3.6 Train-Test Split
 # ============================================================
+"""
+Splits into X_train/X_test/y_train/y_test before any fit-dependent step
+(outlier stats, feature engineering, encoding, selection, imputation),
+so every such step downstream can be fit on X_train only.
+"""
 print("\n" + "="*60)
 print("STEP 3.6: TRAIN-TEST SPLIT")
 print("="*60)
 
 print("\n--- Split ---")
 
-"""
-Split happens before feature engineering (3.8), categorical encoding (3.9)
-and feature selection (3.10) - not after, as in an earlier version of this
-pipeline - so every statistic-fitting step in those sections (rare-category
-merge thresholds, one-hot category lists, the Facilities vocabulary, the
-missing-value imputation medians) can be fit on X_train only
-and applied to X_test, without having to specially reorder any one of them
-ahead of the split.
-
-Standard train_test_split (random_state=42), not a group-aware split -
-simpler than the GroupShuffleSplit approach used in an earlier version of
-this pipeline. See the known-limitation note below for the trade-off this
-accepts.
-
-X and y are split in a single call, not two separate calls, so X_train/
-y_train are guaranteed to be the same rows (two separate calls risk
-misaligned rows even with the same random_state).
-
-Regression target (price, continuous), not classification, so no stratify=.
-"""
 X = df.drop(columns=['price'])
 y = np.log(df['price'])
 
@@ -500,27 +451,20 @@ print(f"Actual test proportion: {len(X_test) / (len(X_train) + len(X_test)):.3f}
 assert len(X_train) == len(y_train)
 assert len(X_test) == len(y_test)
 
-"""
-Known limitation: once identifier columns (Ad List, Address, description,
-Building Name, etc.) are dropped in 3.10 below, a handful of otherwise-
-distinct listings become row-identical on the remaining feature columns -
-different real properties that simply share every retained attribute. A
-group-aware split (GroupShuffleSplit) would keep every such group on one
-side of the split; the plain random split used here does not, so some of
-these groups may be torn across train/test, meaning a small number of test
-rows could be feature-identical to a training row. This is accepted here as
-a trade-off for pipeline simplicity, not an oversight - the actual count of
-groups affected is measured after feature selection/encoding and reported
-in 3.12's summary table ("Row-identical groups split across train/test").
-"""
+# Known limitation: a plain random split (not group-aware) can leave a
+# small number of feature-identical rows split across train/test once
+# identifier columns are dropped in 3.10 - accepted as a simplicity
+# trade-off, measured and reported in 3.12's summary table.
 
 # ============================================================
-# 3.7 Outlier Treatment (moved after 3.6's split - boxplot, Z-score and
-# Mahalanobis distance statistics are all fit on X_train only, the same
-# leakage rule every other fit-dependent step in this pipeline follows.
-# Detection/visualisation only - no correction is applied in this section
-# yet, candidates are listed for manual review first.)
+# 3.7 Outlier Treatment
 # ============================================================
+"""
+Detects outliers in Property Size/Bedroom/Bathroom/Parking Lot (boxplot +
+Z-score) and in Parking Lot vs price (Mahalanobis distance), all fit on
+X_train only. Detection/visualisation only; confirmed corrections below
+are applied solely where the listing description provides evidence.
+"""
 print("\n" + "="*60)
 print("STEP 3.7: OUTLIER TREATMENT")
 print("="*60)
@@ -554,7 +498,6 @@ def boxplot_zscore_figure(train_series, label, filename):
 
     plt.tight_layout()
     plt.savefig(os.path.join(CLEANING_FIGURES_DIR, filename), dpi=150, bbox_inches="tight")
-    plt.close()
 
     print(f"\n{label}: IQR bounds [{lo:.1f}, {hi:.1f}], IQR outliers: {iqr_outlier.sum()}")
     print(f"{label}: Z-score outliers (|Z| > {Z_THRESHOLD}): {z_outlier.sum()}")
@@ -577,9 +520,6 @@ boxplot_zscore_figure(X_train['Parking Lot'], "Parking Lot", "fig11_parking_lot_
 
 
 def mahalanobis_figure(pair_df, xcol, ycol, title, filename):
-    # Reindex to [xcol, ycol] explicitly - mean_vec/cov/ellipse below are all
-    # computed in this column order, so it must match the plot's x/y axes
-    # regardless of what order the caller's columns happen to be in.
     pair = pair_df[[xcol, ycol]].dropna()
     mean_vec = pair.mean().values
     cov = np.cov(pair.values, rowvar=False)
@@ -589,10 +529,6 @@ def mahalanobis_figure(pair_df, xcol, ycol, title, filename):
     threshold = chi2.ppf(0.975, df=2)
     outlier = mahal_sq > threshold
 
-    # Confidence ellipse at the same chi2 threshold as the outlier cutoff -
-    # its axes come from the covariance matrix's eigenvectors/eigenvalues,
-    # so the ellipse is the direct visual boundary of "Mahalanobis distance
-    # <= threshold": any point outside it is exactly what's flagged red.
     eigvals, eigvecs = np.linalg.eigh(cov)
     order = eigvals.argsort()[::-1]
     eigvals, eigvecs = eigvals[order], eigvecs[:, order]
@@ -615,15 +551,13 @@ def mahalanobis_figure(pair_df, xcol, ycol, title, filename):
     ax.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(CLEANING_FIGURES_DIR, filename), dpi=150, bbox_inches="tight")
-    plt.close()
 
     print(f"Mahalanobis threshold (chi2, df=2, 97.5%): {threshold:.2f}")
     print(f"Outliers flagged: {outlier.sum()} / {len(pair)}")
     return pair.index[outlier]
 
 print("\n--- Parking Lot vs price: Mahalanobis Distance ---")
-# y_train is log(price) (see 3.6 above) - converted back to RM here for interpretability.
-price_train_raw = np.exp(y_train)
+price_train_raw = np.exp(y_train)  # y_train is log(price); back-transformed for interpretability
 pl_pair = pd.DataFrame({'Parking Lot': X_train['Parking Lot'], 'price': price_train_raw})
 pl_outlier_idx = mahalanobis_figure(
     pl_pair, 'Parking Lot', 'price', "Parking Lot vs price", "fig10_parking_price_mahalanobis.png"
@@ -635,21 +569,9 @@ print(pl_review.to_string(index=False))
 
 print("\n--- Confirmed corrections (manually reviewed against description) ---")
 
-"""
-Property Size: rule-based re-check of every row the Z-score screen above
-(fig06) flags, not a one-off patch for the 2 rows found so far - if a
-future data pull changes which rows are extreme, this rule still runs
-against whatever fig06 flags at that time. Priority order: an explicit
-'Land Area' label overrides a 'Built Up'/generic mention (the buyer-facing
-land size is preferred, e.g. Ad List 103792765's 9800 Built Up vs 6800 Land
-Area); otherwise a ~10x/100x/1000x ratio against the generic mention is a
-digit-shift extraction artefact (e.g. 122774 -> 1227.74, 14500 -> 1450);
-no description evidence at all drops the value to NaN (e.g. 103729938,
-'For sale' only); anything else means the description independently
-confirms the original value (e.g. 96973074, 9376 both sides), so it is
-left unchanged. Run against X_train AND X_test - X_test's own flagged list
-may be empty, but the rule still executes against it either way.
-"""
+# Property Size: every row the Z-score screen flags is re-checked against
+# its description (Land Area preferred over Built Up; digit-shift
+# artefacts corrected; no evidence -> NaN; otherwise left unchanged).
 LAND_AREA_PATTERN = re.compile(r'Land\s*Area\s*[:\-]?\s*(\d[\d,]*\.?\d*)\s*sq\.?\s*ft', re.IGNORECASE)
 
 def extract_size_with_source(text):
@@ -664,11 +586,6 @@ def extract_size_with_source(text):
 
 print("\n--- Property Size: description-based rule applied to Z-score outliers ---")
 
-# Z-score threshold (mean/std) is fit on X_train only and re-used as-is for
-# X_test - same leakage rule the Parking Lot rule below already follows.
-# Only the outlier-detection threshold is train-fit; the actual correction
-# for each flagged row still comes from that row's own description (not a
-# fitted statistic), so there is no leakage in that half of the rule.
 train_size_mean = X_train['Property Size'].dropna().mean()
 train_size_std = X_train['Property Size'].dropna().std()
 
@@ -679,9 +596,6 @@ for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
     if len(flagged_idx) == 0:
         print(f"{split_name}: no Property Size Z-score outliers - rule has no rows to apply to")
         continue
-    # Cast to float first - a correction below may introduce NaN or a
-    # fractional value (e.g. 1227.74), neither of which fits the int64
-    # dtype Property Size was cast to back in 3.4.
     frame['Property Size'] = frame['Property Size'].astype(float)
     for idx in flagged_idx:
         original = frame.loc[idx, 'Property Size']
@@ -699,26 +613,9 @@ for split_name, frame in [('X_train', X_train), ('X_test', X_test)]:
         frame.loc[idx, 'Property Size'] = corrected
         print(f"Ad List {int(frame.loc[idx, 'Ad List'])} in {split_name}: {note}")
 
-"""
-Bedroom / Bathroom: rule-based re-check, scoped to >=8 only - NOT the full
-Z-score outlier list (fig07/fig08 flag 37/71 rows in X_train alone, most of
-them ordinary 5-6 bedroom / 2-3 bathroom units). A blanket regex against the
-full list was tried and rejected here after producing false positives of
-exactly the kind already documented dataset-wide in notes/bedroom_bathroom_
-regex_false_positives.csv: (a) "SQFT : 3000\\nBEDROOMS : 6" - the earlier
-[\\s-]* pattern crossed the newline and grabbed the SQFT figure instead; (b)
-"4+1 bedroom" (a common Malaysian listing convention meaning 5 total) - the
-regex can only ever capture the "1" immediately before "bedroom", silently
-corrupting a correct value of 5. Restricting to >=8 keeps the scope to
-genuinely extreme, individually-checkable rows, and [^\\S\\n]* (whitespace
-but not newline) replaces the old \\s* so a match can no longer span two
-lines. Both variables use the same >=8 threshold and the same rule shape -
-Bathroom used to be a single hardcoded correction (Ad List 103207012), but
-its one flagged row is handled identically by this generalised rule, so the
-one-off version was replaced rather than kept alongside it. Run against
-X_train AND X_test even though either split's >=8 list may be empty - the
-loop still executes against it.
-"""
+# Bedroom/Bathroom: correction scoped to >= 8 only (not the full Z-score
+# list), to avoid false positives from ambiguous listing phrasing; each
+# flagged row is checked against its own description.
 BEDROOM_DESC_PATTERN = re.compile(r'(\d+)[^\S\n]*-?[^\S\n]*bed[^\S\n]*-?[^\S\n]*rooms?\b', re.IGNORECASE)
 BATHROOM_DESC_PATTERN = re.compile(r'(\d+)[^\S\n]*-?[^\S\n]*bath[^\S\n]*-?[^\S\n]*rooms?\b', re.IGNORECASE)
 
@@ -750,19 +647,10 @@ for col, pattern in [('Bedroom', BEDROOM_DESC_PATTERN), ('Bathroom', BATHROOM_DE
                 print(f"Ad List {adlist} in {split_name}: description confirms original value ({original}), no change")
         print(f"{split_name}: {corrected_count}/{len(flagged_idx)} {col} >= 8 rows corrected via description match")
 
-"""
-Parking Lot: second-layer domain-knowledge filter on top of the Mahalanobis
-candidates above - many parking lots is only suspicious paired with a price
-far below what that many parking lots would normally command (Parking Lot
-and price are positively correlated, r=0.42 on X_train). ">=4" is the first
-integer past Parking Lot's own IQR upper bound (3.5, from the boxplot
-above); "50% of median" marks a price far enough under the X_train typical
-price that ordinary variation doesn't explain it. No independent source
-confirms the true count, so these become NaN (like Total Units==1 in 3.4),
-not a corrected value - deferred to 3.11.1 imputation. The threshold itself is
-computed from X_train's price median only and re-used as-is for X_test, so
-no test-set statistic leaks into the rule.
-"""
+# Parking Lot: domain-knowledge filter on top of the Mahalanobis candidates
+# - >=4 lots paired with price far below the X_train median has no
+# plausible explanation and no independent source to verify, so it's set
+# to NaN for later imputation.
 parking_lot_price_threshold = price_train_raw.median() * 0.5
 print(f"\nParking Lot low-price threshold (50% of X_train median price): RM{parking_lot_price_threshold:,.0f}")
 for split_name, frame, price_series in [
@@ -780,38 +668,21 @@ for split_name, frame, price_series in [
         print(f"Parking Lot -> NaN in {split_name}: no matching rows")
 
 # ============================================================
-# 3.8 Feature Engineering (moved after 3.6's split - every rule
-# here is a fixed transformation with no data-dependent fitting,
-# so it is applied to X_train and X_test independently)
+# 3.8 Feature Engineering
 # ============================================================
+"""
+Derives State (from Address), Property Age (from Completion Year),
+Listed_Facility_Count and Has_X amenity flags (from Facilities/nearby
+columns). All fixed transformations, applied to X_train/X_test independently.
+"""
 print("\n" + "="*60)
 print("STEP 3.8: FEATURE ENGINEERING")
 print("="*60)
 
 print("\n--- 3.8.1 State (extracted from Address) ---")
 
-"""
-Address format is inconsistent across rows - not just varying prefixes, but
-the state isn't always the last comma-separated segment. Some listings write
-"..., State, City" instead of "..., City, State" (e.g. "Puchong, Selangor,
-Puchong"), which would make a last-segment-only extraction miss the state
-entirely (confirmed: all 152 addresses where the naive last-segment approach
-failed turned out to have the state one or more segments earlier, not
-missing). So every segment is checked, scanning from the end backwards, and
-matched against a fixed list of real Malaysian states - exact whole-segment
-equality, not substring search, so a place name that merely contains a
-state's name (e.g. "Kampung Melaka") is never mistaken for the state
-"Melaka".
-
-Matching is case-insensitive (e.g. "SABAH", "putrajaya") - two rows in this
-dataset have a wrong-case state segment, currently masked only by a
-correctly-cased duplicate elsewhere in the same address; without case-
-insensitivity a future row with no such backup would be wrongly marked NaN.
-
-This is a fixed rule with nothing fitted from data, so it's applied to
-X_train and X_test independently below - unlike the rare-category merge and
-one-hot encoding built from 'State' in 3.9, which must be fit on X_train only.
-"""
+# Scans every comma-separated Address segment (not just the last) against a
+# fixed list of Malaysian states, case-insensitive.
 VALID_STATES = {'Selangor', 'Penang', 'Kuala Lumpur', 'Johor', 'Sabah', 'Sarawak',
                  'Perak', 'Kedah', 'Pahang', 'Negeri Sembilan', 'Melaka',
                  'Terengganu', 'Kelantan', 'Perlis', 'Putrajaya', 'Labuan'}
@@ -828,15 +699,8 @@ def extract_state_from_address(address):
 
 print("\n--- 3.8.2 Property Age (from Completion Year) ---")
 
-"""
-Property Age is computed against a fixed reference year, not whatever year
-the script happens to run in - Completion Year is a fixed fact about the
-property, and this dataset was collected in September 2023 (per the Kaggle
-source), so ages must be measured from then, not from today's calendar year.
-A negative age (Completion Year after REFERENCE_YEAR) isn't invalid data -
-it means the unit was still under construction / sold off-plan at the time
-of collection, so Property Age is correctly left NaN for these rows.
-"""
+# Property Age = fixed reference year (dataset collection year) minus
+# Completion Year; a negative result (off-plan) is left as NaN.
 REFERENCE_YEAR = 2023
 
 def compute_property_age(completion_year):
@@ -847,11 +711,8 @@ def compute_property_age(completion_year):
 
 print("\n--- 3.8.3 Listed_Facility_Count (from Facilities) ---")
 
-"""
-Purely numeric items are dropped before counting - Ad List 95706905's
-Facilities value ends in a stray "10" that isn't a real facility name (a
-scraping artefact), which would otherwise silently inflate its count by 1.
-"""
+# Counts valid facility items in the Facilities text, dropping purely
+# numeric (non-facility) entries.
 def count_facilities(facilities_text):
     if pd.isna(facilities_text):
         return 0
@@ -860,17 +721,8 @@ def count_facilities(facilities_text):
 
 print("\n--- 3.8.4 Has_X flags (from 'nearby amenity' text columns) ---")
 
-"""
-Bus Stop / Mall / Park / School / Hospital / Highway / Railway Station each
-list a specific nearby amenity name as free text, with missing rates
-between 76% and 96% (see notes_missing_value_decision_audit.md). The
-specific name has too little repeat structure to be usable directly, but
-whether the field was filled in at all is itself a signal. Converting to a
-presence flag also removes the missing-value problem entirely - every row
-gets 0 or 1. Note this flag means "information was recorded", not "amenity
-confirmed absent" - a 0 does not prove there is no mall nearby, only that it
-wasn't written.
-"""
+# Converts each nearby-amenity text column into a presence flag (1 =
+# information recorded, 0 = not recorded - not a confirmed absence).
 NEARBY_COLUMNS = ['Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station']
 
 def engineer_features(X, label):
@@ -902,70 +754,34 @@ def engineer_features(X, label):
 X_train = engineer_features(X_train, "X_train")
 X_test = engineer_features(X_test, "X_test")
 
-"""
-State's rare-category merge and one-hot encoding, and Property Type's
-rare-category merge and one-hot encoding, are both statistics computed from
-data (which categories are common enough to keep), so they are fit on
-X_train only and applied to X_test - see 3.9 below, not here. 'State' is
-kept here as plain extracted text for that reason.
-"""
+# State/Property Type's rare-category merge and one-hot encoding are fit
+# on X_train only - see 3.9 below, not here.
 
-"""
---- Features tried in 3.8 and dropped (kept here as a record, not in X) ---
-
-Is_Off_Plan: 1 if Completion Year > REFERENCE_YEAR (still under construction
-at collection time), 0 if completed, NaN if Completion Year itself missing -
-tried so the off-plan signal wouldn't collapse into the same NaN as a
-genuinely unknown Completion Year. Dropped: only 22/3793 (0.6%) positive
-cases, and r=-0.0004, p=0.986 against price - not significant.
-
-Facilities_Recorded: a presence flag paired with Listed_Facility_Count.
-Dropped after verifying Listed_Facility_Count == 0 for exactly the same 607
-rows where Facilities is missing, with zero exceptions - pure redundancy.
-
-Nearby_Amenity_Count: sum of the 7 Has_X flags into a single 0-7 score.
-Dropped - a pure linear combination of columns already in X, and
-empirically low-value too: r=-0.019, p=0.242 against price (n=3793), not
-statistically significant.
-
-Units per Floor: Total Units / # of Floors. Dropped because several rows
-produce physically impossible values (e.g. Ad List 100502825, Total
-Units=7810 / # of Floors=5 = 1562 units on one floor). Left out until that
-upstream data quality issue is resolved with evidence.
-"""
+# Features considered and dropped (not in X): Is_Off_Plan (not significant
+# against price), Facilities_Recorded (redundant with
+# Listed_Facility_Count == 0), Nearby_Amenity_Count (linear combination of
+# existing Has_X flags, not significant), Units per Floor (produces
+# physically impossible values for some rows).
 
 print(f"\nX_train shape after 3.8: {X_train.shape} | X_test shape after 3.8: {X_test.shape}")
 
 # ============================================================
-# 3.9 Categorical Encoding (executed after 3.8, before 3.10's
-# drop - fixed-rule encodings are applied to X_train/X_test
-# independently; State and Property Type's rare-category merge
-# and one-hot encoding are fit on X_train only, then applied to
-# X_test, since the merge threshold is a statistic of the data)
+# 3.9 Categorical Encoding
 # ============================================================
+"""
+Encodes Land Title, Tenure Type, Floor Range, Facilities (fixed rules,
+applied to X_train/X_test independently), then State and Property Type
+(rare-category merge + one-hot, fit on X_train only).
+"""
 print("\n" + "="*60)
 print("STEP 3.9: CATEGORICAL ENCODING")
 print("="*60)
 
 print("\n--- 3.9.1 Land Title: rare-category merge, then binary encoding ---")
 
-"""
-Land Title has 3 categories: Non Bumi Lot, Bumi Lot, Malay Reserved. Malay
-Reserved is under 0.2% of records - the same sparse-category problem as
-Property Type's rare types. Merged into Bumi Lot rather than one-hot as its
-own column: both Bumi Lot and Malay Reserved represent land with restricted
-purchase eligibility (Bumiputera-only), in contrast to Non Bumi Lot's
-unrestricted eligibility - a real, domain-based grouping rather than a
-statistic computed from data, so it's applied to X_train and X_test
-independently rather than fit on X_train only.
-
-That merge leaves only 2 categories, so a full one-hot would just produce a
-second column that's the exact logical negation of the first - a binary
-flag is more direct.
-
-Uses .map() rather than a `== 'Non Bumi Lot'` comparison - `==` against NaN
-silently returns False (misclassified as Bumi Lot) instead of staying NaN.
-"""
+# Merges the rare 'Malay Reserved' category into 'Bumi Lot' (same
+# purchase-restriction status), then encodes the two remaining categories
+# as a single binary flag.
 for _X, _label in [(X_train, "X_train"), (X_test, "X_test")]:
     _X['Land Title'] = _X['Land Title'].replace('Malay Reserved', 'Bumi Lot')
     _X['Is_Non_Bumi_Lot'] = _X['Land Title'].map({'Non Bumi Lot': 1, 'Bumi Lot': 0})
@@ -974,16 +790,8 @@ print("\n" + "-"*60)
 
 print("\n--- 3.9.2 Tenure Type: binary encoding ---")
 
-"""
-Only 2 categories (Freehold / Leasehold, 0 missing) - a full one-hot would
-produce a second column that's the exact logical negation of the first (the
-"dummy variable trap"), so a single binary indicator carries the same
-information with one fewer redundant column. Fixed rule, applied to
-X_train/X_test independently.
-
-Uses .map() rather than a `== 'Freehold'` comparison, for the same
-NaN-safety reason as Land Title above.
-"""
+# Encodes Tenure Type (2 categories, no missing values) as a single binary
+# flag instead of one-hot.
 for _X, _label in [(X_train, "X_train"), (X_test, "X_test")]:
     _X['Freehold Indicator'] = _X['Tenure Type'].map({'Freehold': 1, 'Leasehold': 0})
     print(f"[{_label}] 'Freehold Indicator' value counts:\n{_X['Freehold Indicator'].value_counts(dropna=False)}")
@@ -991,18 +799,8 @@ print("\n" + "-"*60)
 
 print("\n--- 3.9.3 Floor Range: ordinal encoding ---")
 
-"""
-Low/Medium/High have a real order (higher floor is a meaningfully different
-attribute, not an arbitrary label), so ordinal encoding preserves that
-monotonic relationship instead of discarding it into unordered one-hot
-columns. "Unknown" (filled in back in 3.5) doesn't fit that order, so it
-maps to NaN here rather than being forced into a fake rank. Fixed mapping
-rule, applied to X_train/X_test independently.
-
-Filling Floor_Range_Ordinal's NaN is deliberately NOT done here - it happens
-in the imputation step below, using only X_train's median, for the same
-leakage reason the other numeric imputations are deferred there.
-"""
+# Encodes Floor Range as an ordinal (Low/Medium/High have a real order);
+# Unknown maps to NaN, imputed later in 3.11.1.
 for _X, _label in [(X_train, "X_train"), (X_test, "X_test")]:
     _X['Floor_Range_Ordinal'] = _X['Floor Range'].map({'Low': 1, 'Medium': 2, 'High': 3})
     print(f"[{_label}] 'Floor_Range_Ordinal' value counts (NaN=Unknown, imputed later):\n"
@@ -1011,22 +809,9 @@ print("\n" + "-"*60)
 
 print("\n--- 3.9.4 Facilities: text cleanup + multi-hot encoding (vocabulary fit on X_train only) ---")
 
-"""
-Cleanup pipeline, applied before binarising: split on comma, strip
-whitespace, title-case for consistency, drop purely numeric junk (the same
-"10" scraping artefact filtered in Listed_Facility_Count's Ad List
-95706905).
-
-The full facility vocabulary is fixed (14 distinct names, verified earlier
-across the whole dataset, no synonyms/case variants), so it does not
-normally differ between X_train and X_test - but it is still, technically, a
-statistic read off the data, so it's fit (learned) on X_train's facility
-lists only via MultiLabelBinarizer. X_test is then built by reindexing
-against exactly the columns X_train produced: any facility name seen only in
-X_test (not seen in X_train) is silently ignored rather than creating a new
-column - same reindex-and-fill-0 pattern used for State/Property Type's
-one-hot below.
-"""
+# Cleans the Facilities text (split/strip/title-case, drop numeric junk),
+# then multi-hot encodes it; the vocabulary is fit on X_train only, and any
+# facility name unseen in X_train is dropped (not encoded) in X_test.
 def clean_facility_list(facilities_text):
     if pd.isna(facilities_text):
         return []
@@ -1065,13 +850,11 @@ print("\n" + "-"*60)
 # ============================================================
 # EDA snapshot (train-only, post fixed-rule encoding, pre one-hot)
 # ============================================================
-# Section 4 (EDA) must not look at X_test (leakage) and must not use raw
-# houses_cleaned.csv (that's pre-split, includes test rows). This is the one
-# point in the pipeline where every fixed-rule 3.8/3.9 feature already
-# exists (Has_X amenity flags, Property Age, Listed_Facility_Count,
-# Is_Non_Bumi_Lot, Freehold Indicator, Floor_Range_Ordinal, facility
-# multi-hot) AND State/Property Type are still plain text - the two
-# fit-on-X_train one-hot encodings below haven't run yet.
+"""
+Saves the Section 4 EDA input: X_train only (no test-set leakage), with
+every 3.8/3.9 fixed-rule feature already built, before State/Property
+Type's one-hot encoding runs.
+"""
 print("\n--- EDA snapshot (train-only, engineered, pre one-hot) ---")
 eda_cols_to_drop = [
     'description', 'Ad List',
@@ -1081,47 +864,20 @@ eda_cols_to_drop = [
     'Address', 'Completion Year',
     'Bus Stop', 'Mall', 'Park', 'School', 'Hospital', 'Highway', 'Railway Station',
     'Facilities',
-    # Tenure Type, Land Title, Floor Range, State, Property Type deliberately
-    # kept as text for EDA (clean categories, readable axis labels) even
-    # though each has a derived numeric column too (Freehold Indicator,
-    # Is_Non_Bumi_Lot, Floor_Range_Ordinal, and State/Property Type's
-    # one-hot below) - Facilities is different: it's free-text, not a clean
-    # category, so only its Has_* multi-hot form is kept.
 ]
 eda_train = X_train.drop(columns=eda_cols_to_drop).copy()
-# price is always a whole RM amount in the source data (verified int64 in
-# houses_cleaned.csv) - round() clears the float noise np.exp(log(x))
-# round-tripping introduces (e.g. 350000 -> 350000.0000000001).
+# price is always a whole RM amount in the source data - round() clears the
+# float noise np.exp(log(x)) round-tripping introduces.
 eda_train['price'] = np.exp(y_train).round().astype(int)
 eda_train.to_csv(os.path.join(EDA_DIR, "train_for_eda.csv"), index=False)
 print(f"train_for_eda.csv saved: {eda_train.shape}")
 
 print("\n--- 3.9.5 State: rare-category merge + one-hot encoding (fit on X_train only) ---")
 
-"""
-State has no inherent order between categories (Selangor isn't "more" or
-"less" than Penang), so one-hot is the right encoding - unlike Floor Range,
-which gets ordinal encoding because Low/Medium/High has a real order.
-
-NaN is turned into an explicit "Unknown" category before encoding, not left
-as NaN - get_dummies() would otherwise silently mark all dummy columns as 0
-for missing rows, identical to "known and simply not any of these states"
-rather than "state genuinely not on record". This fill is a constant, not a
-fitted statistic, so it's safe to apply to X_train and X_test independently.
-
-The <10-listings rare-category threshold IS a fitted statistic (unlike the
-fill above, it depends on which categories are common enough to keep), so
-it's computed from X_train's value_counts() ONLY, then the same rare-category
-list is applied to X_test's State column - the same leakage rule used for
-the imputation medians below.
-
-X_test's State is cast to a Categorical using X_train's post-merge category
-list (not encoded independently) - this guarantees get_dummies drops the
-same reference category on both sides. Any category X_train never saw at all
-becomes NaN in X_test and gets an all-zero dummy row, the same as a proper
-unseen-category fallback in a deployed model. The reindex below is then just
-a safety net for column order/coverage.
-"""
+# State has no inherent order, so one-hot is used (unlike Floor Range's
+# ordinal encoding). NaN becomes an explicit 'Unknown' category; the rare-
+# category threshold and category list are fit on X_train only and applied
+# to X_test.
 X_train['State'] = X_train['State'].fillna('Unknown')
 X_test['State'] = X_test['State'].fillna('Unknown')
 
@@ -1135,11 +891,6 @@ X_test['State'] = X_test['State'].replace(rare_states, 'Other')
 
 state_categories = sorted(X_train['State'].unique())
 X_train['State'] = pd.Categorical(X_train['State'], categories=state_categories)
-# Any X_test value absent from X_train entirely (e.g. a singleton state that
-# landed only in the test split) isn't in state_categories and isn't in
-# rare_states either (rare_states only lists values X_train actually saw) -
-# cleared to NaN explicitly before the Categorical cast, since pandas now
-# deprecates letting the cast do that implicitly.
 X_test['State'] = X_test['State'].where(X_test['State'].isin(state_categories))
 X_test['State'] = pd.Categorical(X_test['State'], categories=state_categories)
 
@@ -1158,15 +909,9 @@ print("\n" + "-"*60)
 
 print("\n--- 3.9.6 Property Type: one-hot encoding (categories fit on X_train only) ---")
 
-"""
-No rare-category merge step here (unlike State above) - 3.2.2 already
-removes Duplex/Studio/Townhouse Condo/Others before the split, so every
-Property Type remaining by the time X_train exists (Condominium/Apartment/
-Service Residence/Flat) has hundreds+ listings. Category list is still fit
-on X_train only and applied to X_test (not encoded independently), the
-same leakage rule as State, so an unseen category in X_test would still
-fall back to an all-zero dummy row rather than crashing.
-"""
+# No rare-category merge needed here - 3.2.3 already removed the rare
+# types, so every remaining Property Type has hundreds+ listings. Category
+# list is fit on X_train only and applied to X_test.
 property_type_categories = sorted(X_train['Property Type'].unique())
 X_train['Property Type'] = pd.Categorical(X_train['Property Type'], categories=property_type_categories)
 X_test['Property Type'] = X_test['Property Type'].where(X_test['Property Type'].isin(property_type_categories))
@@ -1190,18 +935,16 @@ print(f"\nX_train shape after 3.9: {X_train.shape} | X_test shape after 3.9: {X_
 # ============================================================
 # 3.10 Feature Selection
 # ============================================================
+"""
+Drops raw columns with no predictive value on their own merits (3.10.1),
+and raw columns already superseded by a 3.8/3.9 engineered feature (3.10.2).
+"""
 print("\n" + "="*60)
 print("STEP 3.10: FEATURE SELECTION")
 print("="*60)
 
 print("\n--- 3.10.1 Stage A: columns with no predictive value, unrelated to any 3.8/3.9 engineering ---")
 
-"""
-These were never going to be used, encoded or otherwise - dropped purely on
-their own merits (unstructured text, unique identifier, zero variance,
-agent/listing-firm metadata unrelated to the property, or high cardinality
-with no extractable pattern), independent of anything built in 3.8/3.9.
-"""
 cols_no_engineering = [
     'description', 'Ad List',
     'Nearby School', 'Nearby Mall', 'Nearby Railway Station',
@@ -1216,21 +959,6 @@ for c in cols_no_engineering:
 
 print("\n--- 3.10.2 Stage B: raw columns already superseded by a 3.8/3.9 engineered feature ---")
 
-"""
-Each of these was kept alive specifically so 3.8/3.9 could extract from it
-(Has_X flags from the 7 nearby-amenity columns, Freehold Indicator from
-Tenure Type, Is_Non_Bumi_Lot from Land Title, Floor_Range_Ordinal from
-Floor Range, multi-hot from Facilities, one-hot from State/Property Type -
-both fit on X_train and applied to X_test already, in 3.9 above). Now that
-every extraction/encoding is done, the raw source column is redundant with
-its own derived feature(s) already in X.
-
-Completion Year is dropped for a different, stronger reason than the
-others: verified Property Age == REFERENCE_YEAR - Completion Year exactly,
-for every non-off-plan row, with zero exceptions. This isn't approximate
-overlap - it's the same variable in different units, so keeping both would
-hand a linear model perfectly collinear inputs for no benefit.
-"""
 cols_replaced_by_engineering = [
     'Address',
     'Completion Year',
@@ -1260,33 +988,17 @@ print("\n" + "-"*60)
 # ============================================================
 # 3.11.1 Missing-value Imputation
 # ============================================================
+"""
+Median-imputes the columns still carrying real NaN, fit on X_train only
+and applied to X_test. Property Age/# of Floors/Total Units/Parking Lot
+also get a missing-indicator flag (missingness itself is significant
+against price for these); Property Size and Floor_Range_Ordinal are
+median-filled only, no flag.
+"""
 print("\n" + "="*60)
 print("STEP 3.11.1: MISSING-VALUE IMPUTATION")
 print("="*60)
 
-"""
-These columns still carry real NaN, deliberately left unfilled since 3.5 /
-3.8's Property Age computation, since imputing before the split existed
-would compute a statistic from data the model shouldn't have seen yet. The
-median itself comes from X_train.median() (skipna=True by default, so
-already-observed values compute it correctly), then the SAME value is used
-to fill X_test - X_test's own median is never touched, which is what avoids
-leaking test-set information into the imputation.
-
-Property Age / # of Floors / Total Units / Parking Lot each get a
-missing-indicator flag before the median fill - regression testing (R² and
-a t-test on each flag's coefficient) confirmed missingness itself is
-statistically significant against price for all four (p < 1e-16), so an
-imputed median and a genuinely-observed value are NOT the same information
-here, and collapsing that distinction would hide a real signal from the
-model.
-
-Property Size is excluded from flagging - it has only 1 missing value in
-the raw data, too small a sample for the flag's coefficient to support any
-meaningful statistical inference (same reasoning already used in 3.8 to
-drop Is_Off_Plan for having too few positive cases). Floor_Range_Ordinal is
-likewise median-filled only, with no flag added.
-"""
 IMPUTE_FLAG_COLS = {
     'Property Age': 'Property_Age_Missing',
     '# of Floors': 'Num_Floors_Missing',
@@ -1330,34 +1042,18 @@ print(f"\nSaved X_train/X_test/y_train/y_test to {MODELLING_DIR}")
 # ============================================================
 # 3.11.2 Feature Scaling
 # ============================================================
+"""
+Log-transforms (log1p) the continuous/count numeric columns, applied
+identically to X_train and X_test (log1p has no fitted parameters, so
+no train-only fit step is needed). Saved separately as the "_scaled"
+files; tree-based models can use the unscaled X_train.csv/X_test.csv instead.
+"""
 print("\n" + "="*60)
 print("STEP 3.11.2: FEATURE SCALING")
 print("="*60)
 
 print("\n--- Log transform (log1p), applied identically to X_train and X_test ---")
 
-"""
-Log scale (np.log1p) instead of StandardScaler - this dataset has genuine
-extreme values (e.g. Total Units up to several thousand) and heavily
-right-skewed distributions, and log1p compresses that long tail directly at
-the source rather than just re-centring a mean/std that's itself distorted
-by the skew.
-
-log1p (log(1+x)), not log(x), because these columns can legitimately be 0
-(e.g. Parking Lot, Property Age, Listed_Facility_Count) and log(0) is
-undefined.
-
-Only genuinely continuous/count numeric columns are transformed, plus
-Floor_Range_Ordinal - price is the target, not a feature, so it's excluded
-entirely. One-hot columns (State_*/PropertyType_*) and binary flags
-(Has_*/Is_Non_Bumi_Lot/Freehold Indicator/the imputation *_Missing flags)
-are left as-is (already bounded 0/1, log-transforming a dummy isn't
-meaningful).
-
-Unlike StandardScaler, log1p has no fitted parameters (no mean/std learned
-from data), so there's no train-only "fit" step - it's applied identically
-to X_train and X_test, and no leakage risk to guard against here.
-"""
 SCALE_COLS = ['Bedroom', 'Bathroom', 'Property Size', '# of Floors',
               'Total Units', 'Parking Lot', 'Property Age', 'Listed_Facility_Count',
               'Floor_Range_Ordinal']
@@ -1371,13 +1067,6 @@ print(X_train[SCALE_COLS].describe().loc[['mean', 'std']])
 print(f"\nX_test[SCALE_COLS] post-transform summary:")
 print(X_test[SCALE_COLS].describe().loc[['mean', 'std']])
 
-"""
-Saved under _scaled filenames, not overwriting the imputation step's
-X_train.csv/X_test.csv - tree-based models (Decision Tree/Random Forest/
-Gradient Boosting) don't need this transform and can use that
-untransformed-but-imputed version directly. No scaler object to persist
-here (log1p is stateless), unlike the StandardScaler version this replaced.
-"""
 X_train.to_csv(os.path.join(MODELLING_DIR, "X_train_scaled.csv"), index=False)
 X_test.to_csv(os.path.join(MODELLING_DIR, "X_test_scaled.csv"), index=False)
 joblib.dump((X_train, X_test, y_train, y_test), os.path.join(MODELLING_DIR, "train_test_split_scaled.pkl"))
@@ -1386,20 +1075,15 @@ print(f"\nSaved log-transformed X_train_scaled/X_test_scaled (untransformed X_tr
 # ============================================================
 # 3.12 Final Dataset Structure Summary
 # ============================================================
+"""
+Reports the final feature set (retained raw / dropped / engineered),
+read from X_train's columns since 3.8-3.10 operate on X_train/X_test,
+not on `df`.
+"""
 print("\n" + "="*60)
 print("STEP 3.12: FINAL DATASET STRUCTURE SUMMARY")
 print("="*60)
 
-"""
-Feature engineering (3.8), encoding (3.9) and selection (3.10) now run on
-X_train/X_test after the split, not on `df` beforehand, so `df` only
-reflects the cleaned dataset through 3.5 (pre-engineering, still including
-'price' and every raw column). The "final" feature set this summary
-describes is therefore read from X_train's columns, not df's - and
-cols_no_engineering / cols_replaced_by_engineering (built in 3.10 above) are
-reused rather than retyped, so this can't silently drift out of sync with
-what the pipeline actually dropped.
-"""
 dropped_cols = cols_no_engineering + cols_replaced_by_engineering
 retained_raw_cols = [c for c in RAW_COLUMNS if c in X_train.columns]
 engineered_cols = [c for c in X_train.columns if c not in RAW_COLUMNS]
@@ -1422,16 +1106,10 @@ print(f"Remaining NaN in X_test:  {X_test.isna().sum().sum()}")
 
 print("\n--- Summary table ---")
 
-"""
-"Row-identical groups split across train/test" - an earlier version of this
-pipeline used a GroupShuffleSplit specifically to force this count to 0.
-3.6 now uses a plain train_test_split for simplicity instead, so this
-number is expected to be non-zero: it counts feature-identical rows
-(different real listings that happen to agree on every retained column,
-once identifying columns are dropped in 3.10) that landed on opposite sides
-of the split. This is documented as an accepted limitation of the
-simplified split, not a bug - see 3.6's docstring above.
-"""
+# "Row-identical groups split across train/test": counts feature-identical
+# rows (different real listings agreeing on every retained column, once
+# identifiers are dropped in 3.10) split across train/test - an accepted
+# limitation of 3.6's plain random split, not a bug.
 _train_tagged = X_train.assign(price=y_train.values, _src='train')
 _test_tagged = X_test.assign(price=y_test.values, _src='test')
 _combined = pd.concat([_train_tagged, _test_tagged], ignore_index=True)
