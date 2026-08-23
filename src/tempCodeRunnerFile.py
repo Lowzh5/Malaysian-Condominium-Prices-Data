@@ -1,17 +1,18 @@
 import pandas as pd
 from pathlib import Path
 
-raw_path = Path(__file__).parent.parent / "data" / "raw" / "houses.csv"
-output_path = Path(__file__).parent.parent / "data" / "eda" / "eda_results.xlsx"
-
-df = pd.read_csv(raw_path)
+file_path = Path(__file__).parent.parent / "data" / "eda" / "eda_results.xlsx"
+sheet = "D2.5"
+df = pd.read_excel(file_path, sheet_name=sheet)
 
 def to_numeric_digits_only(series):
+    # For fields with currency symbols/units/thousand-separators (e.g. "RM 340 000", "1000 sq.ft.")
     s = series.astype(str).str.replace(r'[^0-9]', '', regex=True)
     s = s.replace('', pd.NA)
     return pd.to_numeric(s, errors='coerce')
 
 def to_numeric_decimal(series):
+    # For plain numeric fields that may have real decimals
     s = series.astype(str).str.extract(r'(-?\d+\.?\d*)')[0]
     return pd.to_numeric(s, errors='coerce')
 
@@ -47,7 +48,7 @@ for label, (actual_col, mode) in col_map.items():
 stats_df = pd.DataFrame(results)
 stats_df.index.name = 'Statistic'
 
-with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+with pd.ExcelWriter(file_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
     stats_df.to_excel(writer, sheet_name="Statistics")
 
 print(stats_df)
