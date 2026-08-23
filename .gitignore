@@ -28,3 +28,7 @@ data/eda/*.csv
 data/eda/*.png
 data/eda/*.xlsx
 data/cleaning_figures/*.png
+
+# Trained model artifacts (reproducible by re-running the model_*.ipynb notebooks)
+models/*.pkl
+models/*.json
