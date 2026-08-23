@@ -16,28 +16,131 @@ def show_full_numbers(ax, axis='x'):
     (ax.xaxis if axis == 'x' else ax.yaxis).set_major_formatter(formatter)
 
 
+# Ordinal one-hue ramp (blue, monotone lightness): bin order carries meaning
+# (age bands, facility tiers), so color encodes that order, not identity.
+ORDINAL_RAMP = ['#86b6ef', '#3987e5', '#1c5cab', '#0d366b']
+CHART_SURFACE = '#fcfcfb'
+TEXT_PRIMARY = '#0b0b0b'
+TEXT_MUTED = '#898781'
+GRIDLINE = '#e1e0d9'
+BASELINE = '#c3c2b7'
+ANOMALY_COLOR = '#eb6834'   # accent (categorical slot 2, orange) for flagged points
+
+
+def plot_ordinal_line_trend(labels, values, title, xlabel, ylabel, filename, smooth_window=5,
+                             median_bracket=None, range_band=None):
+    """Line chart for a full ordered sequence (every raw value, not binned).
+    The raw line is thin/faint (real but noisy); a rolling-mean line on top
+    carries the actual trend shape.
+
+    median_bracket: optional (label, y_value, text, side) - a dot + label at
+    one representative point for a group's median. The line is allowed to
+    pass behind the label (opaque background keeps the number readable).
+    range_band: optional (label_start, label_end, y_low, y_high, text) -
+    two dashed reference lines + one label for a plateau range."""
+    n = len(labels)
+    raw_color = ORDINAL_RAMP[1]
+    smooth_color = ORDINAL_RAMP[-1]
+
+    smoothed = pd.Series(values).rolling(smooth_window, center=True, min_periods=1).mean()
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    fig.patch.set_facecolor(CHART_SURFACE)
+    ax.set_facecolor(CHART_SURFACE)
+
+    x = np.arange(n)
+    ax.fill_between(x, smoothed, 0, color=smooth_color, alpha=0.08, zorder=1)
+    ax.plot(x, values, color=raw_color, linewidth=1.2, alpha=0.45, zorder=2, label="Actual")
+    ax.plot(x, smoothed, color=smooth_color, linewidth=2.5, solid_capstyle='round',
+            solid_joinstyle='round', zorder=3, label=f"Smoothed ({smooth_window}-point avg)")
+
+    label_box = dict(facecolor=CHART_SURFACE, edgecolor='none', pad=2)
+
+    if median_bracket:
+        label, y_value, text, side = median_bracket
+        xi = labels.index(label)
+        ax.scatter(xi, y_value, s=130, color=ORDINAL_RAMP[0], edgecolor=CHART_SURFACE,
+                    linewidth=2, zorder=5)
+        offset = max(values) * 0.03 * (1 if side == 'above' else -1)
+        ax.text(xi, y_value + offset, text, ha='left', va='bottom' if side == 'above' else 'top',
+                 fontsize=10, color=TEXT_PRIMARY, zorder=5, bbox=label_box)
+
+    if range_band:
+        label_start, label_end, y_low, y_high, text = range_band
+        xi_start, xi_end = labels.index(label_start), labels.index(label_end)
+        for y in (y_low, y_high):
+            ax.hlines(y, xi_start, xi_end, color=TEXT_MUTED, linewidth=1.2,
+                       linestyle=(0, (5, 3)), zorder=4)
+        ax.text((xi_start + xi_end) / 2, y_high + max(values) * 0.03, text, ha='center', va='bottom',
+                 fontsize=10, color=TEXT_PRIMARY, zorder=5, bbox=label_box)
+
+    ax.yaxis.grid(True, color=GRIDLINE, linewidth=1, zorder=0)
+    ax.set_axisbelow(True)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, color=TEXT_MUTED, fontsize=8,
+                        rotation=90 if n > 20 else 0)
+    ax.set_xlim(-0.5, n - 0.5)
+
+    ax.set_title(title, color=TEXT_PRIMARY, fontsize=13, pad=32)
+    ax.set_xlabel(xlabel, color=TEXT_MUTED, fontsize=10)
+    ax.set_ylabel(ylabel, color=TEXT_MUTED, fontsize=10)
+    show_full_numbers(ax, 'y')
+    ax.tick_params(axis='y', colors=TEXT_MUTED, labelsize=9)
+    ax.set_ylim(0, max(values) * 1.15)
+    ax.legend(loc='lower right', bbox_to_anchor=(1, 1.01), ncol=2,
+              frameon=False, labelcolor=TEXT_MUTED, fontsize=9)
+
+    for side in ['top', 'right', 'left']:
+        ax.spines[side].set_visible(False)
+    ax.spines['bottom'].set_color(BASELINE)
+    ax.tick_params(axis='x', length=0)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(EDA_DIR, filename), dpi=150, facecolor=CHART_SURFACE, bbox_inches="tight")
+    print(f"\nSaved: {filename}")
+
+
+def plot_emphasis_scatter(data, x_col, y_col, is_anomaly, xlabel, ylabel, title, filename,
+                           line_x=None, line_y=None):
+    """Scatter with all listings de-emphasized in gray, flagged anomalies
+    highlighted in the accent hue, and an optional expected-value line."""
+    fig, ax = plt.subplots(figsize=(9, 6))
+    fig.patch.set_facecolor(CHART_SURFACE)
+    ax.set_facecolor(CHART_SURFACE)
+
+    ax.scatter(data[x_col], data[y_col], s=14, color=BASELINE, alpha=0.5, zorder=1, label="All listings")
+    if line_x is not None:
+        ax.plot(line_x, line_y, color=ORDINAL_RAMP[1], linewidth=2, zorder=2, label="Expected (trend)")
+    flagged = data[is_anomaly]
+    ax.scatter(flagged[x_col], flagged[y_col], s=70, color=ANOMALY_COLOR,
+               edgecolor=CHART_SURFACE, linewidth=1, zorder=3, label="Flagged anomaly")
+
+    ax.yaxis.grid(True, color=GRIDLINE, linewidth=1, zorder=0)
+    ax.set_axisbelow(True)
+    ax.set_title(title, color=TEXT_PRIMARY, fontsize=13, pad=32)
+    ax.set_xlabel(xlabel, color=TEXT_MUTED, fontsize=10)
+    ax.set_ylabel(ylabel, color=TEXT_MUTED, fontsize=10)
+    show_full_numbers(ax, 'y')
+    ax.tick_params(axis='y', colors=TEXT_MUTED, labelsize=9)
+    ax.tick_params(axis='x', colors=TEXT_MUTED, labelsize=9)
+    for side in ['top', 'right', 'left']:
+        ax.spines[side].set_visible(False)
+    ax.spines['bottom'].set_color(BASELINE)
+    ax.legend(loc='lower right', bbox_to_anchor=(1, 1.01), ncol=3,
+              frameon=False, labelcolor=TEXT_MUTED, fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(EDA_DIR, filename), dpi=150, facecolor=CHART_SURFACE, bbox_inches="tight")
+    print(f"\nSaved: {filename}")
+
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EDA_DIR = os.path.join(BASE_DIR, "data", "eda")   # train_for_eda.csv, all EDA figures, and eda_results.xlsx all live here
+EDA_DIR = os.path.join(BASE_DIR, "data", "eda")   # train_for_eda.csv and all EDA figures live here
 os.makedirs(EDA_DIR, exist_ok=True)
 
 df = pd.read_csv(os.path.join(EDA_DIR, "train_for_eda.csv"))
 price = df['price']
-
-EXCEL_PATH = os.path.join(EDA_DIR, "eda_results.xlsx")
-
-
-def write_sheets(sheets: dict):
-    """
-    Write {sheet_name: dataframe} into the shared workbook. Only the sheets
-    passed in are replaced; every other sheet already in the workbook (from
-    other 4.x subsections) is left untouched.
-    """
-    write_mode = 'a' if os.path.exists(EXCEL_PATH) else 'w'
-    writer_kwargs = {'if_sheet_exists': 'replace'} if write_mode == 'a' else {}
-    with pd.ExcelWriter(EXCEL_PATH, engine='openpyxl', mode=write_mode, **writer_kwargs) as writer:
-        for sheet_name, frame in sheets.items():
-            frame.to_excel(writer, sheet_name=sheet_name, index=False)
-
 
 # ============================================================
 # 4.1.1 Price Distribution and Central Tendency
@@ -76,9 +179,8 @@ ax.set_title("Price Distribution (raw, train set)")
 ax.legend()
 show_full_numbers(ax, 'x')
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "eda_411_price_hist_kde.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved: eda_411_price_hist_kde.png")
+plt.savefig(os.path.join(EDA_DIR, "fig_411_price_hist_kde.png"), dpi=150, bbox_inches="tight")
+print("Saved: fig_411_price_hist_kde.png")
 
 # ============================================================
 # 4.1.2 Skewness and Normality Assessment
@@ -104,9 +206,8 @@ axes[1].set_title(f"log10(Price) (skew = {skew_log:.2f})")
 axes[1].set_xlabel("log10(Price)")
 
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "eda_412_price_log_comparison.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved: eda_412_price_log_comparison.png")
+plt.savefig(os.path.join(EDA_DIR, "fig_412_price_log_comparison.png"), dpi=150, bbox_inches="tight")
+print("Saved: fig_412_price_log_comparison.png")
 
 print(f"""
 Why log transformation is required for ML models:
@@ -159,9 +260,8 @@ ax.set_ylabel("Price (RM)")
 ax.set_title("Price Distribution by Property Type (major categories)")
 show_full_numbers(ax, 'y')
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "eda_413_price_by_property_type.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print("Saved: eda_413_price_by_property_type.png")
+plt.savefig(os.path.join(EDA_DIR, "fig_413_price_by_property_type.png"), dpi=150, bbox_inches="tight")
+print("Saved: fig_413_price_by_property_type.png")
 
 
 # ============================================================
@@ -180,8 +280,7 @@ plt.title('Distribution of Property Size (sq.ft.)')
 plt.xlabel('Property Size (sq.ft.)')
 plt.ylabel('Frequency')
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_2_1_property_size_hist.png"), dpi=150, bbox_inches="tight")
-plt.close()
+plt.savefig(os.path.join(EDA_DIR, "fig_421_property_size_hist.png"), dpi=150, bbox_inches="tight")
 
 # --- Boxplot ---
 plt.figure(figsize=(8, 3))
@@ -189,8 +288,7 @@ sns.boxplot(x=size, color='lightcoral')
 plt.title('Boxplot of Property Size (sq.ft.)')
 plt.xlabel('Property Size (sq.ft.)')
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_2_1_property_size_box.png"), dpi=150, bbox_inches="tight")
-plt.close()
+plt.savefig(os.path.join(EDA_DIR, "fig_421_property_size_box.png"), dpi=150, bbox_inches="tight")
 
 # --- Summary statistics ---
 summary_table = pd.DataFrame({
@@ -221,11 +319,6 @@ print(f"Number of outliers: {len(outliers)} ({len(outliers) / len(df) * 100:.1f}
 print("\nTop 10 largest properties (potential outliers):")
 print(outliers_top10.to_string(index=False))
 
-outlier_meta = pd.DataFrame({
-    'Metric': ['Lower Bound', 'Upper Bound', 'Num Outliers', 'Pct Outliers'],
-    'Value': [lower_bound, upper_bound, len(outliers), f"{len(outliers) / len(df) * 100:.1f}%"]
-})
-
 # --- Log transform (to address right skew) ---
 df['log_Property_Size'] = np.log1p(df['Property Size'])
 log_size = df['log_Property_Size'].dropna()
@@ -240,8 +333,7 @@ axes[1, 0].set_title('Original Boxplot')
 sns.boxplot(x=log_size, color='lightgreen', ax=axes[1, 1])
 axes[1, 1].set_title('Log-Transformed Boxplot')
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_2_1_property_size_log_comparison.png"), dpi=150, bbox_inches="tight")
-plt.close()
+plt.savefig(os.path.join(EDA_DIR, "fig_421_property_size_log_comparison.png"), dpi=150, bbox_inches="tight")
 
 skew_table = pd.DataFrame({
     'Version': ['Original', 'Log-Transformed'],
@@ -250,21 +342,10 @@ skew_table = pd.DataFrame({
 print("\n--- Skewness Comparison ---")
 print(skew_table.to_string(index=False))
 
-write_sheets({
-    'PropSize_Summary': summary_table,
-    'PropSize_Skewness': skew_table,
-})
-# Outliers sheet needs two tables stacked with a gap row (metadata, then
-# top-10 table), so it's written directly rather than via write_sheets().
-with pd.ExcelWriter(EXCEL_PATH, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-    outlier_meta.to_excel(writer, sheet_name='PropSize_Outliers', index=False, startrow=0)
-    outliers_top10.to_excel(writer, sheet_name='PropSize_Outliers', index=False, startrow=len(outlier_meta) + 2)
-
 print(f"\n[4.2.1] Figures saved to: {EDA_DIR}")
-print("  fig_4_2_1_property_size_hist.png")
-print("  fig_4_2_1_property_size_box.png")
-print("  fig_4_2_1_property_size_log_comparison.png")
-print(f"[4.2.1] Workbook sheets written: PropSize_Summary, PropSize_Outliers, PropSize_Skewness")
+print("  fig_421_property_size_hist.png")
+print("  fig_421_property_size_box.png")
+print("  fig_421_property_size_log_comparison.png")
 
 
 # ============================================================
@@ -287,9 +368,8 @@ for var in DISCRETE_VARS:
     plt.ylabel('Frequency')
     plt.tight_layout()
 
-    fname = f"fig_4_2_2_{var.replace(' ', '_').lower()}_countplot.png"
+    fname = f"fig_422_{var.replace(' ', '_').lower()}_countplot.png"
     plt.savefig(os.path.join(EDA_DIR, fname), dpi=150, bbox_inches="tight")
-    plt.close()
     print(f"Saved: {fname}")
 
 # --- Mode identification ---
@@ -311,12 +391,9 @@ mode_table = pd.DataFrame(mode_rows)
 print("\n--- Mode Summary (Bedroom / Bathroom / Parking Lot) ---")
 print(mode_table.to_string(index=False))
 
-write_sheets({'Discrete_Mode': mode_table})
-
 print(f"\n[4.2.2] Figures saved to: {EDA_DIR}")
 for var in DISCRETE_VARS:
-    print(f"  fig_4_2_2_{var.replace(' ', '_').lower()}_countplot.png")
-print(f"[4.2.2] Workbook sheet written: Discrete_Mode")
+    print(f"  fig_422_{var.replace(' ', '_').lower()}_countplot.png")
 
 
 # ============================================================
@@ -357,9 +434,8 @@ for var in CATEGORICAL_VARS:
         plt.text(count, i, f"  {count} ({pct_val}%)", va='center', fontsize=9)
     plt.tight_layout()
 
-    fname = f"fig_4_2_3_{var.replace(' ', '_').lower()}_barchart.png"
+    fname = f"fig_423_{var.replace(' ', '_').lower()}_barchart.png"
     plt.savefig(os.path.join(EDA_DIR, fname), dpi=150, bbox_inches="tight")
-    plt.close()
     print(f"Saved: {fname}")
 
 # --- Proportions for major category splits (as report call-outs) ---
@@ -389,21 +465,11 @@ if set(['Non Bumi Lot', 'Bumi Lot']).issubset(set(df['Land Title'].dropna().uniq
 major_split_table = pd.DataFrame(major_split_rows)
 print(major_split_table.to_string(index=False))
 
-# ============================================================
-# Write calculated tables into the shared workbook
-#    - Each variable's frequency table gets its own sheet
-#    - Major-split proportions get one combined sheet
-# ============================================================
-cat_sheets = {f"{var.replace(' ', '')}_Freq": tbl for var, tbl in cat_freq_tables.items()}
-cat_sheets['Categorical_MajorSplits'] = major_split_table
-write_sheets(cat_sheets)
-
 print(f"\n[4.2.3] Figures saved to: {EDA_DIR}")
 for var in CATEGORICAL_VARS:
-    print(f"  fig_4_2_3_{var.replace(' ', '_').lower()}_barchart.png")
-print(f"[4.2.3] Workbook sheets written: {list(cat_sheets.keys())}")
+    print(f"  fig_423_{var.replace(' ', '_').lower()}_barchart.png")
 
-print(f"\nAll of Section 4.2 complete (4.2.1-4.2.3). Workbook: {EXCEL_PATH}")
+print(f"\nAll of Section 4.2 complete (4.2.1-4.2.3).")
 
 
 # ============================================================
@@ -431,9 +497,8 @@ sns.heatmap(core_corr, annot=True, fmt=".2f", cmap="coolwarm", center=0,
             square=True, linewidths=0.5, ax=ax, cbar_kws={"shrink": 0.8})
 ax.set_title("Pearson Correlation Matrix (Core Numeric Features)")
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_3_1_correlation_heatmap.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print(f"\nSaved: fig_4_3_1_correlation_heatmap.png")
+plt.savefig(os.path.join(EDA_DIR, "fig_431_correlation_heatmap.png"), dpi=150, bbox_inches="tight")
+print(f"\nSaved: fig_431_correlation_heatmap.png")
 
 AMENITY_COLS = [c for c in df.columns if c.startswith('Has_')]
 
@@ -449,18 +514,8 @@ ax.set_title("Amenity Correlation with log10_price")
 ax.set_xlabel("Pearson r")
 ax.axvline(0, color='black', linewidth=0.8)
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_3_1_amenity_correlation.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print(f"\nSaved: fig_4_3_1_amenity_correlation.png")
-
-write_sheets({
-    'CoreCorr_Matrix': core_corr.reset_index().rename(columns={'index': 'Feature'}),
-    'CoreCorr_vs_Price': core_corr_vs_price.reset_index().rename(
-        columns={'index': 'Feature', 'log10_price': 'Correlation_with_log10_price'}),
-    'AmenityCorr_vs_Price': amenity_corr.reset_index().rename(
-        columns={'index': 'Amenity', 'log10_price': 'Correlation_with_log10_price'}),
-})
-print(f"[4.3.1] Workbook sheets written: CoreCorr_Matrix, CoreCorr_vs_Price, AmenityCorr_vs_Price")
+plt.savefig(os.path.join(EDA_DIR, "fig_431_amenity_correlation.png"), dpi=150, bbox_inches="tight")
+print(f"\nSaved: fig_431_amenity_correlation.png")
 
 # ============================================================
 # 4.3.2 Price vs. Property Size Interaction
@@ -481,13 +536,6 @@ n_excluded = len(df) - len(filtered)
 print(f"\nTotal rows: {len(df)}")
 print(f"Rows excluded by filter (>= {SIZE_LIMIT} sqft OR >= RM{PRICE_LIMIT:,}): {n_excluded} "
       f"({n_excluded/len(df)*100:.2f}%)")
-
-filter_summary = pd.DataFrame({
-    'Metric': ['Total rows', 'Size limit (sqft)', 'Price limit (RM)',
-               'Rows excluded', 'Pct excluded'],
-    'Value': [len(df), SIZE_LIMIT, PRICE_LIMIT,
-              n_excluded, round(n_excluded / len(df) * 100, 2)]
-})
 
 bedroom_order = sorted(filtered['Bedroom_Group'].unique(),
                         key=lambda x: 99 if x == '5+' else int(x))
@@ -512,9 +560,8 @@ axes[1].set_ylabel("Price (RM)")
 axes[1].legend(title="Bedroom", loc='upper left', fontsize=9)
 
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_3_2_price_vs_property_size.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print(f"\nSaved: fig_4_3_2_price_vs_property_size.png")
+plt.savefig(os.path.join(EDA_DIR, "fig_432_price_vs_property_size.png"), dpi=150, bbox_inches="tight")
+print(f"\nSaved: fig_432_price_vs_property_size.png")
 
 # ------------------------------------------------------------
 # 4.3.2b Price vs Property Size — Linear Trend
@@ -525,11 +572,6 @@ r_value = filtered['Property Size'].corr(filtered['price'])
 print(f"\nLinear fit: price = {slope:.2f} * Property_Size + ({intercept:.2f})")
 print(f"Pearson r (filtered subset): {r_value:.3f}")
 
-linear_fit_table = pd.DataFrame({
-    'Metric': ['Slope', 'Intercept', 'Pearson r (filtered subset)'],
-    'Value': [slope, intercept, r_value]
-})
-
 fig, ax = plt.subplots(figsize=(9, 7))
 sns.regplot(data=filtered, x='Property Size', y='price',
             scatter_kws={'alpha': 0.3, 's': 15, 'color': 'steelblue'},
@@ -539,15 +581,8 @@ ax.set_title("Price vs Property Size with Linear Trend (Filtered)")
 ax.set_xlabel("Property Size (sqft)")
 ax.set_ylabel("Price (RM)")
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_3_2_trend_line.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print(f"\nSaved: fig_4_3_2_trend_line.png")
-
-write_sheets({
-    'PropSize_FilterSummary': filter_summary,
-    'PropSize_LinearFit': linear_fit_table,
-})
-print(f"[4.3.2] Workbook sheets written: PropSize_FilterSummary, PropSize_LinearFit")
+plt.savefig(os.path.join(EDA_DIR, "fig_432_trend_line.png"), dpi=150, bbox_inches="tight")
+print(f"\nSaved: fig_432_trend_line.png")
 
 # ============================================================
 # 4.3.3 Price vs. Room Features
@@ -585,15 +620,8 @@ axes[1].set_xlabel("Bathroom")
 axes[1].set_ylabel("Price (RM)")
 
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_3_3_price_vs_room_features.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print(f"\nSaved: fig_4_3_3_price_vs_room_features.png")
-
-write_sheets({
-    'MedianPrice_Bedroom': median_by_bedroom.reset_index().rename(columns={'price': 'Median_Price'}),
-    'MedianPrice_Bathroom': median_by_bathroom.reset_index().rename(columns={'price': 'Median_Price'}),
-})
-print(f"[4.3.3] Workbook sheets written: MedianPrice_Bedroom, MedianPrice_Bathroom")
+plt.savefig(os.path.join(EDA_DIR, "fig_433_price_vs_room_features.png"), dpi=150, bbox_inches="tight")
+print(f"\nSaved: fig_433_price_vs_room_features.png")
 
 # ============================================================
 # 4.3.4 Price vs Parking Lot Count
@@ -623,13 +651,147 @@ ax.set_title(f"Price by Parking Lot Count (N={len(parking_plot_df)}, "
 ax.set_xlabel("Parking Lot")
 ax.set_ylabel("Price (RM)")
 plt.tight_layout()
-plt.savefig(os.path.join(EDA_DIR, "fig_4_3_4_price_vs_parking_lot.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print(f"\nSaved: fig_4_3_4_price_vs_parking_lot.png")
+plt.savefig(os.path.join(EDA_DIR, "fig_434_price_vs_parking_lot.png"), dpi=150, bbox_inches="tight")
+print(f"\nSaved: fig_434_price_vs_parking_lot.png")
 
-write_sheets({
-    'MedianPrice_Parking': median_by_parking.reset_index().rename(columns={'price': 'Median_Price'}),
-})
-print(f"[4.3.4] Workbook sheet written: MedianPrice_Parking")
+print(f"\nAll of Section 4.3 complete.")
 
-print(f"\nAll of Section 4.3 complete. Workbook: {EXCEL_PATH}")
+
+# ============================================================
+# 4.4.1 Property Age Depreciation Pattern
+# ============================================================
+print("\n" + "=" * 60)
+print("STEP 4.4.1: PROPERTY AGE DEPRECIATION PATTERN")
+print("=" * 60)
+
+n_age_missing = df['Property Age'].isna().sum()
+print(f"Rows with missing Property Age (excluded from this pattern): {n_age_missing}")
+
+age_trend = df.groupby('Property Age', observed=True)['price'].agg(
+    Count='count', Median_Price='median')
+print("\n--- Median Price by Property Age (every year) ---")
+print(age_trend)
+
+age_labels = [str(int(a)) for a in age_trend.index]
+young_median = df.loc[df['Property Age'].between(0, 5), 'price'].median()
+
+plot_ordinal_line_trend(
+    labels=age_labels,
+    values=age_trend['Median_Price'].tolist(),
+    title="Median Price by Property Age (Depreciation Trend)",
+    xlabel="Property Age (years)",
+    ylabel="Median Price (RM)",
+    filename="fig_441_price_by_property_age.png",
+    median_bracket=("2", young_median, f"0-5 yrs median: RM {young_median:,.0f}", "above"),
+    range_band=("20", age_labels[-1], 300000, 350000, "~RM 300,000 - 350,000"),
+)
+
+# ============================================================
+# 4.4.2 Facility Count Pattern
+# ============================================================
+print("\n" + "=" * 60)
+print("STEP 4.4.2: FACILITY COUNT PATTERN")
+print("=" * 60)
+
+facility_trend = df.groupby('Listed_Facility_Count', observed=True)['price'].agg(
+    Count='count', Median_Price='median')
+print("\n--- Median Price by Facility Count (every count) ---")
+print(facility_trend)
+
+plot_ordinal_line_trend(
+    labels=[str(int(c)) for c in facility_trend.index],
+    values=facility_trend['Median_Price'].tolist(),
+    title="Median Price by Facility Count",
+    xlabel="Listed Facility Count",
+    ylabel="Median Price (RM)",
+    filename="fig_442_price_by_facility_tier.png",
+)
+
+# ============================================================
+# 4.4.3 Price vs Property Size Anomalies
+# ============================================================
+print("\n" + "=" * 60)
+print("STEP 4.4.3: PRICE VS PROPERTY SIZE ANOMALIES")
+print("=" * 60)
+
+# Reuses the linear fit (slope, intercept) from 4.3.2. A listing far from
+# that line is priced very differently than its size would predict -
+# a bivariate anomaly, not the single-variable outliers already handled
+# in Sections 3.6/3.7.
+size_df = df.dropna(subset=['Property Size']).copy()
+size_df['Predicted_Price'] = slope * size_df['Property Size'] + intercept
+size_df['Residual'] = size_df['price'] - size_df['Predicted_Price']
+
+is_anomaly_size = size_df['Residual'].abs().rank(ascending=False, method='first') <= 10
+top_anomalies_size = size_df.loc[is_anomaly_size,
+    ['Property Size', 'Bedroom', 'Bathroom', 'price', 'Predicted_Price', 'Residual']
+].sort_values('Residual', key=abs, ascending=False)
+print("\n--- Top 10 Price-vs-Size Anomalies (largest |actual - predicted|) ---")
+print(top_anomalies_size.to_string(index=False))
+
+fit_x = np.linspace(size_df['Property Size'].min(), size_df['Property Size'].max(), 100)
+fit_y = slope * fit_x + intercept
+
+plot_emphasis_scatter(
+    data=size_df, x_col='Property Size', y_col='price', is_anomaly=is_anomaly_size,
+    line_x=fit_x, line_y=fit_y,
+    xlabel="Property Size (sqft)", ylabel="Price (RM)",
+    title="Price vs Property Size - Flagged Anomalies",
+    filename="fig_443_price_size_anomalies.png",
+)
+
+# ============================================================
+# 4.4.4 Facility Tier Deviation Anomalies
+# ============================================================
+print("\n" + "=" * 60)
+print("STEP 4.4.4: FACILITY TIER DEVIATION ANOMALIES")
+print("=" * 60)
+
+# Expected price = the 4.4.2 median for that listing's own facility count.
+# A listing far from its own tier's median is anomalous relative to what
+# similar-facility listings sell for.
+df['Facility_Expected_Price'] = df['Listed_Facility_Count'].map(facility_trend['Median_Price'])
+df['Facility_Residual'] = df['price'] - df['Facility_Expected_Price']
+
+is_anomaly_fac = df['Facility_Residual'].abs().rank(ascending=False, method='first') <= 10
+top_anomalies_fac = df.loc[is_anomaly_fac,
+    ['Listed_Facility_Count', 'price', 'Facility_Expected_Price', 'Facility_Residual']
+].sort_values('Facility_Residual', key=abs, ascending=False)
+print("\n--- Top 10 Facility-Tier Anomalies (largest |actual - tier median|) ---")
+print(top_anomalies_fac.to_string(index=False))
+
+plot_emphasis_scatter(
+    data=df, x_col='Listed_Facility_Count', y_col='price', is_anomaly=is_anomaly_fac,
+    line_x=facility_trend.index.tolist(), line_y=facility_trend['Median_Price'].tolist(),
+    xlabel="Listed Facility Count", ylabel="Price (RM)",
+    title="Price vs Facility Count - Flagged Anomalies",
+    filename="fig_444_facility_anomalies.png",
+)
+
+# ============================================================
+# 4.4.5 Property Age Deviation Anomalies
+# ============================================================
+print("\n" + "=" * 60)
+print("STEP 4.4.5: PROPERTY AGE DEVIATION ANOMALIES")
+print("=" * 60)
+
+# Expected price = the 4.4.1 median for that listing's own property age.
+df['Age_Expected_Price'] = df['Property Age'].map(age_trend['Median_Price'])
+df['Age_Residual'] = df['price'] - df['Age_Expected_Price']
+
+is_anomaly_age = df['Age_Residual'].abs().rank(ascending=False, method='first') <= 10
+top_anomalies_age = df.loc[is_anomaly_age,
+    ['Property Age', 'price', 'Age_Expected_Price', 'Age_Residual']
+].sort_values('Age_Residual', key=abs, ascending=False)
+print("\n--- Top 10 Property-Age Anomalies (largest |actual - age median|) ---")
+print(top_anomalies_age.to_string(index=False))
+
+plot_emphasis_scatter(
+    data=df.dropna(subset=['Property Age']), x_col='Property Age', y_col='price', is_anomaly=is_anomaly_age,
+    line_x=age_trend.index.tolist(), line_y=age_trend['Median_Price'].tolist(),
+    xlabel="Property Age (years)", ylabel="Price (RM)",
+    title="Price vs Property Age - Flagged Anomalies",
+    filename="fig_445_property_age_anomalies.png",
+)
+
+print(f"\nAll of Section 4.4 complete.")
