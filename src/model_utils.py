@@ -8,7 +8,7 @@ def evaluate_model(model, X, y_log, label=""):
     """Evaluate a model trained on log(price) against log(price) targets.
     Predictions and actuals are converted back to RM (np.exp) before computing
     metrics, since price was log-transformed in Section 3.6 but the report
-    defines RMSE/MAE/MSE in RM (Section 1.8).
+    defines RMSE/MAE in RM (Section 1.8).
 
     Also reports MAPE (the % version of MAE, averaged per-listing) and RMSE
     as a % of the median actual price (RMSE_pct, using median rather than
@@ -22,7 +22,6 @@ def evaluate_model(model, X, y_log, label=""):
     rmse = np.sqrt(mean_squared_error(y_true_rm, y_pred_rm))
     mae = mean_absolute_error(y_true_rm, y_pred_rm)
     r2 = r2_score(y_true_rm, y_pred_rm)
-    mse = mean_squared_error(y_true_rm, y_pred_rm)
     mape = np.mean(np.abs((y_true_rm - y_pred_rm) / y_true_rm)) * 100
     rmse_pct = rmse / np.median(y_true_rm) * 100
 
@@ -31,9 +30,8 @@ def evaluate_model(model, X, y_log, label=""):
         print(f"{label} MAE:   RM {mae:,.0f}")
         print(f"{label} MAPE:  {mape:.1f}%")
         print(f"{label} R2:    {r2:.4f}")
-        print(f"{label} MSE:   {mse:,.0f}")
 
-    return {"RMSE": rmse, "MAE": mae, "R2": r2, "MSE": mse,
+    return {"RMSE": rmse, "MAE": mae, "R2": r2,
             "MAPE": mape, "RMSE_pct": rmse_pct}
 
 
@@ -64,6 +62,5 @@ def cross_validate_model(model, X, y_log, n_splits=5, random_state=42):
     print(f"  MAE:   RM {mean['MAE']:,.0f} +/- {std['MAE']:,.0f}")
     print(f"  MAPE:  {mean['MAPE']:.1f}% +/- {std['MAPE']:.1f}%")
     print(f"  R2:    {mean['R2']:.4f} +/- {std['R2']:.4f}")
-    print(f"  MSE:   {mean['MSE']:,.0f} +/- {std['MSE']:,.0f}")
 
     return {"fold_results": fold_results, "mean": mean, "std": std}
