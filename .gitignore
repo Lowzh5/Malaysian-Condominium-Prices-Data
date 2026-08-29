@@ -19,18 +19,11 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Generated/derived data (reproducible from data/raw + src pipeline scripts)
-data/processed/*.pkl
-data/processed/*.csv
-data/modelling/*.pkl
-data/modelling/*.csv
-data/eda/*.csv
-data/eda/*.png
-data/eda/*.xlsx
-data/cleaning_figures/*.png
+# Generated/derived data (reproducible by re-running data_preprocessing.ipynb;
+# src/houses.csv is the raw source and stays tracked)
+src/houses_cleaned.csv
+src/train_for_eda.csv
+model/modelling_data/*.csv
 
 # Trained model artifacts (reproducible by re-running the model_*.ipynb notebooks)
-models/*.pkl
-models/*.json
-
-data/extra/missingness_significance_test.csv
+streamlit/*.pkl
