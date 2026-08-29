@@ -32,7 +32,7 @@ MUTED = "#8A8577"
 # log1p-scaled X_train_scaled.csv (distance/gradient-based models). KNN's own
 # StandardScaler is baked into knn_model.pkl as a sklearn Pipeline (see
 # model_knn.ipynb), so it needs no separate scaler file or handling here.
-# Only models whose .pkl actually exists in models/ show up in the app.
+# Only models whose .pkl actually exists in this folder show up in the app.
 # ---------------------------------------------------------------------------
 MODEL_REGISTRY = {
     "XGBoost": {"file": "xgboost_model.pkl", "data": "raw", "note": "Lowest typical error"},
@@ -49,6 +49,14 @@ BEST_MODEL = "XGBoost"
 SCALE_COLS = ["Bedroom", "Bathroom", "Property Size", "# of Floors",
               "Total Units", "Parking Lot", "Property Age", "Listed_Facility_Count"]
 
+# data_preprocessing.ipynb 3.8.2: Property Age = REFERENCE_YEAR - Completion Year,
+# using the dataset's 2023 collection year as "now". A Completion Year after that
+# means the unit was still under construction/pre-launch when scraped, which makes
+# a negative age meaningless - those rows got Property Age = NaN, later median-imputed
+# (Section 3.11.1 / Table 3.19: training median = 9) with Property_Age_Missing = 1.
+REFERENCE_YEAR = 2023
+PROPERTY_AGE_TRAIN_MEDIAN = 9
+
 FACILITY_COLS = ["Barbeque_Area", "Club_House", "Gymnasium", "Jogging_Track", "Lift",
                   "Minimart", "Multipurpose_Hall", "Parking", "Playground", "Sauna",
                   "Security", "Squash_Court", "Swimming_Pool", "Tennis_Court"]
@@ -59,12 +67,54 @@ NEARBY_COLS = ["Bus_Stop", "Mall", "Park", "School", "Hospital", "Highway", "Rai
 # one-hot rows, not their own column.
 STATE_OPTIONS = ["Johor", "Kuala Lumpur", "Melaka", "Negeri Sembilan", "Pahang", "Penang",
                   "Perak", "Putrajaya", "Sabah", "Sarawak", "Selangor", "Other", "Unknown"]
+# Buyer-facing subset for the "Get My Estimate" state picker only. "Unknown"
+# means the original listing's Address was missing (see extract_state_from_address /
+# load_cleaned_data's .fillna("Unknown")) - it isn't a real Malaysian state, so it
+# shouldn't be a choosable property location. Market Explorer's state filter and
+# Model Insights' State_Unknown feature are unaffected - they read df["State"] /
+# the model's own columns directly, not this list.
+BUYER_STATE_OPTIONS = [s for s in STATE_OPTIONS if s != "Unknown"]
 PROPERTY_TYPE_OPTIONS = ["Apartment", "Condominium", "Flat", "Service Residence"]
 
 VALID_STATES = {"Selangor", "Penang", "Kuala Lumpur", "Johor", "Sabah", "Sarawak",
                  "Perak", "Kedah", "Pahang", "Negeri Sembilan", "Melaka",
                  "Terengganu", "Kelantan", "Perlis", "Putrajaya", "Labuan"}
 VALID_STATES_LOWER = {s.lower(): s for s in VALID_STATES}
+
+
+def show_full_numbers(ax, axis="x"):
+    """Replace matplotlib's default 1e6-style offset notation with plain,
+    comma-separated numbers (e.g. 1,000,000 instead of 1e6)."""
+    import matplotlib.ticker as mticker
+    formatter = mticker.FuncFormatter(lambda val, _: f"{val:,.0f}")
+    (ax.xaxis if axis == "x" else ax.yaxis).set_major_formatter(formatter)
+
+
+def pad_xlim_for_labels(ax, values, frac=0.3):
+    """Explicitly widen a horizontal bar chart's x-axis so bar_label() value
+    annotations (e.g. "RM 200,777") have room and never touch/overlap the
+    axes border. Uses a fixed, data-derived xlim rather than ax.margins(),
+    which is heuristic and - if the data ever contains NaN/Inf mid-rerun -
+    can raise "Axis limits cannot be NaN or Inf" when Matplotlib recomputes
+    the view; non-finite values are dropped first so that never happens here.
+
+    frac=0.3 (rather than a smaller value) was chosen by actually rendering
+    the charts and measuring label bounding boxes against the axes spine in
+    pixel space - smaller fractions (e.g. 0.18) left long value labels like
+    "RM 200,777" a few pixels past the right border. Charts with negative
+    values (signed coefficients) get equal padding on both sides, since
+    labels there sit on either end of the bar, not just the right."""
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return
+    lo, hi = min(0.0, finite.min()), max(0.0, finite.max())
+    span = hi - lo
+    if span == 0:
+        span = abs(hi) if hi != 0 else 1.0
+    pad = span * frac
+    left_pad = pad if lo < 0 else pad * 0.15
+    ax.set_xlim(lo - left_pad, hi + pad)
 
 
 def extract_state_from_address(address):
@@ -143,10 +193,15 @@ def inject_theme():
     .block-container h5 {{ font-family: 'Manrope', sans-serif !important; font-size: 15px !important;
         font-weight: 800 !important; color: #14201A; text-transform: none; margin-bottom: 2px; }}
 
-    /* Metrics */
+    /* Metrics - allow the value to wrap/shrink instead of being ellipsis-cut
+    when a filtered subset pushes it to a long number (e.g. "RM 3,550,000") */
     [data-testid="stMetric"] {{ background: #FFFFFF; border: 1px solid #ECE6D9; border-radius: 14px; padding: 14px 16px; }}
     [data-testid="stMetricLabel"] {{ color: {MUTED} !important; }}
-    [data-testid="stMetricValue"] {{ color: {PRIMARY} !important; font-family: 'Newsreader', serif; }}
+    [data-testid="stMetricValue"] {{
+        color: {PRIMARY} !important; font-family: 'Newsreader', serif;
+        white-space: normal !important; overflow: visible !important; text-overflow: clip !important;
+        font-size: clamp(1.1rem, 2.4vw, 1.8rem) !important; line-height: 1.2 !important;
+    }}
 
     a {{ color: {ACCENT}; }}
     </style>
@@ -228,7 +283,15 @@ def build_feature_row(feature_columns, *, bedroom, bathroom, size, floors, total
     row["# of Floors"] = floors
     row["Total Units"] = total_units
     row["Parking Lot"] = parking
-    row["Property Age"] = max(2023 - completion_year, 0)  # REFERENCE_YEAR=2023, per 3.8.2
+    if completion_year > REFERENCE_YEAR:
+        # Under construction / pre-launch as of the dataset's reference year - same
+        # case the training data hits (3.8.2), so reproduce it the same way: impute
+        # with the training median and flag it, rather than a misleading Property Age.
+        row["Property Age"] = PROPERTY_AGE_TRAIN_MEDIAN
+        if "Property_Age_Missing" in row:
+            row["Property_Age_Missing"] = 1
+    else:
+        row["Property Age"] = REFERENCE_YEAR - completion_year
     row["Listed_Facility_Count"] = len(facilities)
 
     for f in facilities:
@@ -271,11 +334,11 @@ def dataset_for_model(model_info, X_raw, X_scaled):
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
-def page_predict(feature_columns, available_models, test_metrics):
+def page_predict(feature_columns, available_models, test_metrics, df):
     brand_header("predict")
 
     if not available_models:
-        st.warning("No trained models found in `models/`. Run the model notebooks first.")
+        st.warning("No trained models found. Run the model notebooks first.")
         return
 
     model_names = [n for n in MODEL_REGISTRY if n in available_models]
@@ -325,7 +388,7 @@ def page_predict(feature_columns, available_models, test_metrics):
         ]:
             with col:
                 st.markdown(f"""
-                <div style="background:#FFFFFF; border:1px solid #ECE6D9; border-radius:14px; padding:20px; height:100%;">
+                <div style="border-top:2px solid {ACCENT}; padding:16px 2px 0; height:100%;">
                   <div style="font-family:'Newsreader',serif; color:{ACCENT}; font-size:12px; margin-bottom:10px;">{num}</div>
                   <div style="font-weight:800; font-size:14px; margin-bottom:6px; color:#1E241F;">{title}</div>
                   <div style="font-size:12.5px; color:{MUTED}; line-height:1.5;">{desc}</div>
@@ -361,14 +424,24 @@ def page_predict(feature_columns, available_models, test_metrics):
                 c4, c5, c6 = st.columns(3)
                 floors = c4.slider("Floors in building", 2, 63, 20)
                 total_units = c5.number_input("Total units", 1, 8000, 300, step=10)
-                completion_year = c6.slider("Completion year", 1985, 2023, 2015)
-                size = st.slider("Property size (sq ft)", 280, 5000, 1000, step=10)
+                year_lo, year_hi = int(df["Completion Year"].min()), int(df["Completion Year"].max())
+                completion_year = c6.slider("Completion year", year_lo, year_hi, min(2015, year_hi))
+                if completion_year > REFERENCE_YEAR:
+                    st.caption(f"Still under construction / pre-launch as of {REFERENCE_YEAR} - "
+                               "we'll treat its age the same way the model was trained to.")
+                # Cap is 10,000, not the raw dataset max (122,774 sq ft) - that value is a
+                # confirmed digit-shift data-entry error (report 3.4/3.7, corrected to 1,228
+                # in the modelling data but never rewritten back into houses_cleaned.csv). The
+                # largest genuinely-verified unit in the report is 9,376 sq ft (Ad List
+                # 96973074, confirmed against its listing description), so 10,000 covers real
+                # large penthouses without offering the known-bad extreme values as if valid.
+                size = st.slider("Property size (sq ft)", 280, 10000, 1000, step=10)
 
             with st.container(border=True):
                 st.markdown("##### Location & Property Type")
                 c1, c2 = st.columns(2)
                 property_type = c1.selectbox("Property type", PROPERTY_TYPE_OPTIONS)
-                state = c2.selectbox("State", STATE_OPTIONS, index=STATE_OPTIONS.index("Selangor"))
+                state = c2.selectbox("State", BUYER_STATE_OPTIONS, index=BUYER_STATE_OPTIONS.index("Selangor"))
                 c3, c4, c5 = st.columns(3)
                 with c3:
                     floor_range = st.pills("Floor range", ["Low", "Medium", "High"], default="Medium")
@@ -429,6 +502,26 @@ def page_predict(feature_columns, available_models, test_metrics):
         max_price = max(results.values())
 
         # ---- Your estimated property value: the strongest visual element ----
+        # Typical prediction error is the recommended model's live Test RMSE
+        # (same number shown in the "How are these estimates calculated?"
+        # table below) - it's a model-level average error over past test
+        # listings, not a per-property bound, so it's worded and styled as a
+        # secondary, informational note rather than a plus-or-minus range on the price.
+        typical_error = test_metrics.get(headline_model, {}).get("RMSE")
+        error_block_html = ""
+        if typical_error:
+            # Built as a single unindented line on purpose - Streamlit's st.markdown()
+            # runs CommonMark, which treats any line indented 4+ spaces as a code
+            # block, so an indented multi-line f-string here renders as literal text.
+            error_block_html = (
+                '<div style="margin-top:18px; padding-top:14px; border-top:1px solid rgba(255,255,255,0.18);">'
+                '<div style="font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:#9CC2AC; font-weight:700;">Typical Prediction Error</div>'
+                f'<div style="font-size:19px; font-weight:700; color:#EAF3EC; margin-top:4px;">Around RM {typical_error:,.0f}</div>'
+                '<div style="font-size:11.5px; color:#9CC2AC; margin-top:4px; line-height:1.5; max-width:480px;">'
+                f"How far off {headline_model}'s estimates typically are, based on past listings - not a "
+                'guaranteed range for this specific property.'
+                '</div></div>'
+            )
         st.write("")
         st.markdown(f"""
         <div style="padding:36px 40px; border-radius:20px; background:linear-gradient(135deg, {PRIMARY} 0%, #1F4D3D 100%); color:#FFF; margin-top:8px;">
@@ -436,8 +529,10 @@ def page_predict(feature_columns, available_models, test_metrics):
           <div style="font-family:'Newsreader',serif; font-weight:500; font-size:50px; color:#FFF;">RM {headline_price:,.0f}</div>
           <div style="font-size:13.5px; color:#C9E8D5; margin-top:12px;">Based on the property details you provided.</div>
           <div style="font-size:12px; color:#C9E8D5; margin-top:14px; opacity:.8;">Powered by {headline_model}</div>
+          {error_block_html}
         </div>
         """, unsafe_allow_html=True)
+        st.caption("This estimate is for reference only and is not a formal property valuation.")
 
         if len(results) > 1:
             st.write("")
@@ -466,9 +561,9 @@ def page_predict(feature_columns, available_models, test_metrics):
             st.markdown(
                 "The estimates are generated using six regression models (including XGBoost and Random Forest) "
                 "trained on Malaysian condominium listing data (3,755 cleaned listings). Each model independently "
-                "learns the relationship between a property's characteristics and its listing price, so their "
-                "estimates can differ slightly. R² shows how closely a model's estimates matched real prices "
-                "in testing (closer to 1 is better); RMSE shows its typical error size in Ringgit."
+                "learns from the property details and provides an estimated price. R² shows how well the model "
+                "predicts property prices, with values closer to 1 indicating better performance. RMSE shows the "
+                "typical prediction error in Ringgit, with lower values indicating smaller errors."
             )
             detail_rows = []
             for name in model_names:
@@ -485,25 +580,56 @@ def page_predict(feature_columns, available_models, test_metrics):
 def page_explore(df, accent):
     brand_header("explore")
     st.header("Market Explorer")
-    st.caption(f"{len(df):,} cleaned listings, from `data/processed/houses_cleaned.csv`.")
+    st.caption(f"{len(df):,} cleaned listings.")
 
     with st.sidebar:
         st.markdown("---")
         st.subheader("Filters")
+
+        # Primary filters - always visible.
         ptypes = sorted(df["Property Type"].dropna().unique())
         ptype_sel = st.multiselect("Property Type", ptypes, default=ptypes)
+        states = sorted(df["State"].dropna().unique())
+        state_sel = st.multiselect("State", states, default=states)
         price_lo, price_hi = int(df.price.min()), int(df.price.max())
         price_range = st.slider("Price (RM)", price_lo, price_hi, (price_lo, price_hi))
         bed_lo, bed_hi = int(df.Bedroom.min()), int(df.Bedroom.max())
         bed_range = st.slider("Bedroom", bed_lo, bed_hi, (bed_lo, bed_hi))
-        tenures = df["Tenure Type"].dropna().unique().tolist()
-        tenure_sel = st.multiselect("Tenure Type", tenures, default=tenures)
 
+        # Secondary filters - collapsed by default, out of the way for most users.
+        with st.expander("More filters (optional)"):
+            bath_lo, bath_hi = int(df.Bathroom.min()), int(df.Bathroom.max())
+            bath_range = st.slider("Bathroom", bath_lo, bath_hi, (bath_lo, bath_hi))
+            size_lo, size_hi = int(df["Property Size"].min()), int(df["Property Size"].max())
+            size_range = st.slider("Property Size (sq ft)", size_lo, size_hi, (size_lo, size_hi))
+            tenures = df["Tenure Type"].dropna().unique().tolist()
+            tenure_sel = st.multiselect("Tenure Type", tenures, default=tenures)
+            year_lo, year_hi = int(df["Completion Year"].min()), int(df["Completion Year"].max())
+            year_range = st.slider("Completion Year", year_lo, year_hi, (year_lo, year_hi))
+            keep_year_na = st.checkbox("Include listings with no recorded completion year",
+                                        value=True, key="keep_year_na")
+            st.caption("Bathroom/Property Size have no missing values. Completion Year and "
+                       "Parking Lot do - use the checkboxes above/below to decide whether to "
+                       "keep or exclude listings with no recorded value.")
+            floor_ranges = ["Low", "Medium", "High", "Not specified"]
+            floor_sel = st.multiselect("Floor Range", floor_ranges, default=floor_ranges)
+            park_lo, park_hi = int(df["Parking Lot"].min(skipna=True)), int(df["Parking Lot"].max(skipna=True))
+            park_range = st.slider("Parking Lot", park_lo, park_hi, (park_lo, park_hi))
+            keep_park_na = st.checkbox("Include listings with no recorded parking lot count",
+                                        value=True, key="keep_park_na")
+
+    floor_range_display = df["Floor Range"].fillna("Not specified")
     filtered = df[
         df["Property Type"].isin(ptype_sel)
+        & df["State"].isin(state_sel)
         & df["price"].between(*price_range)
         & df["Bedroom"].between(*bed_range)
+        & df["Bathroom"].between(*bath_range)
+        & df["Property Size"].between(*size_range)
         & df["Tenure Type"].isin(tenure_sel)
+        & ((df["Completion Year"].isna() & keep_year_na) | df["Completion Year"].between(*year_range))
+        & floor_range_display.isin(floor_sel)
+        & ((df["Parking Lot"].isna() & keep_park_na) | df["Parking Lot"].between(*park_range))
     ]
     st.write(f"**{len(filtered):,}** listings match your filters")
 
@@ -522,12 +648,15 @@ def page_explore(df, accent):
         fig, ax = plt.subplots(figsize=(9, 4))
         sns.histplot(filtered["price"], bins=40, color=accent, ax=ax)
         ax.set_xlabel("Price (RM)")
+        show_full_numbers(ax, "x")
         ax.set_title("Price Distribution")
         st.pyplot(fig)
     with tab2:
         sample = filtered.sample(min(2000, len(filtered)), random_state=42)
         fig, ax = plt.subplots(figsize=(9, 5))
         sns.scatterplot(data=sample, x="Property Size", y="price", hue="Property Type", alpha=0.5, ax=ax)
+        ax.set_ylabel("Price (RM)")
+        show_full_numbers(ax, "y")
         ax.set_title("Property Size vs Price")
         st.pyplot(fig)
     with tab3:
@@ -539,10 +668,22 @@ def page_explore(df, accent):
         bars = ax.barh(state_summary.index, state_summary["median"], color=colors)
         ax.bar_label(bars, labels=[f"RM {v:,.0f} (n={n})" for v, n in
                                     zip(state_summary["median"], state_summary["count"])], padding=3, fontsize=8)
+        ax.set_xlim(0, state_summary["median"].max() * 1.3)
         ax.set_xlabel("Median Price (RM)")
+        show_full_numbers(ax, "x")
         ax.set_title("Median Price by State (states with >=3 listings)")
         st.pyplot(fig)
+        st.caption("'Unknown' groups listings whose Address had no recognisable Malaysian "
+                   "state name - a real, intentional category (State_Unknown), not missing data; "
+                   "see Section 3.9 of the report.")
     with tab4:
+        st.caption(
+            "Pearson correlation between price and the raw numeric attributes still present at "
+            "this cleaning stage (before Section 3.8-3.9 feature engineering adds the amenity "
+            "flags, State/Property Type dummies, etc. used for modelling). Kept to these 7 "
+            "columns so the heatmap stays readable - the full 51-feature correlation view used "
+            "for modelling is in eda.ipynb Section 4.3.1 / the report's Figure 4.7-4.8."
+        )
         numeric_cols = ["price", "Property Size", "Bedroom", "Bathroom", "Total Units", "# of Floors", "Parking Lot"]
         corr = filtered[numeric_cols].corr()
         fig, ax = plt.subplots(figsize=(7, 6))
@@ -561,14 +702,14 @@ def page_performance(available_models, X_train, X_test, X_train_scaled, X_test_s
                "retrain and re-save their `.pkl` files.")
 
     if not available_models:
-        st.warning("No trained models found in `models/`.")
+        st.warning("No trained models found.")
         return
 
     all_names = list(MODEL_REGISTRY.keys())
     missing = [n for n in all_names if n not in available_models]
     if missing:
         st.info(f"Not yet trained/saved: {', '.join(missing)}. They'll appear here automatically once "
-                f"their `.pkl` is added to `models/`.")
+                f"their `.pkl` is added to this folder.")
 
     rows = []
     for name, info in available_models.items():
@@ -582,7 +723,30 @@ def page_performance(available_models, X_train, X_test, X_train_scaled, X_test_s
             "Test RMSE": test_m["RMSE"], "Test MAE": test_m["MAE"],
             "Test MAPE": test_m["MAPE"], "Test R2": test_m["R2"],
         })
-    metrics_df = pd.DataFrame(rows).sort_values("Test RMSE")
+    metrics_df = pd.DataFrame(rows).sort_values("Test RMSE").reset_index(drop=True)
+
+    # --- Best/recommended model, derived live from metrics_df (lowest Test RMSE) ---
+    best_row = metrics_df.iloc[0]
+    st.markdown(
+        f"""
+        <div style="background:{SURFACE_ALT}; border-left:4px solid {accent};
+                    border-radius:6px; padding:14px 18px; margin-bottom:18px;">
+          <div style="font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:{MUTED};">
+            Recommended Model &middot; lowest Test RMSE
+          </div>
+          <div style="font-family:'Newsreader',serif; font-style:italic; font-size:24px;
+                      color:{PRIMARY}; margin-top:2px;">
+            {best_row['Model']}
+          </div>
+          <div style="color:{MUTED}; font-size:14px; margin-top:4px;">
+            Test RMSE <b style="color:{PRIMARY};">RM {best_row['Test RMSE']:,.0f}</b>
+            &nbsp;&middot;&nbsp; Test R&sup2; <b style="color:{PRIMARY};">{best_row['Test R2']:.3f}</b>
+            &nbsp;&middot;&nbsp; Test MAPE <b style="color:{PRIMARY};">{best_row['Test MAPE']:.1f}%</b>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.subheader("Metrics Table")
     st.dataframe(
@@ -602,7 +766,10 @@ def page_performance(available_models, X_train, X_test, X_train_scaled, X_test_s
         ax.bar_label(bars, labels=[f"RM {v:,.0f}" for v in ordered["Test RMSE"]], padding=3, fontsize=8)
         ax.set_xlabel("Test RMSE (RM)")
         ax.set_title("Test RMSE by Model (lower is better)")
+        pad_xlim_for_labels(ax, ordered["Test RMSE"])
+        fig.tight_layout()
         st.pyplot(fig)
+        plt.close(fig)
     with col2:
         fig, ax = plt.subplots(figsize=(6, 0.6 * len(metrics_df) + 1))
         ordered = metrics_df.sort_values("Test R2", ascending=True)
@@ -611,30 +778,78 @@ def page_performance(available_models, X_train, X_test, X_train_scaled, X_test_s
         ax.bar_label(bars, labels=[f"{v:.3f}" for v in ordered["Test R2"]], padding=3, fontsize=8)
         ax.set_xlabel("Test R2")
         ax.set_title("Test R2 by Model (higher is better)")
+        pad_xlim_for_labels(ax, ordered["Test R2"])
+        fig.tight_layout()
         st.pyplot(fig)
+        plt.close(fig)
+
+    # --- Optional generalisation indicator - additional analysis, table above is unchanged ---
+    with st.expander("Generalisation check: Train -> Test RMSE gap"):
+        st.caption(
+            "A large Train -> Test RMSE increase suggests a model is overfitting the training data; "
+            "a small increase suggests it generalises well to listings it has not seen."
+        )
+        gap_df = metrics_df[["Model", "Train RMSE", "Test RMSE"]].copy()
+        gap_df["RMSE Increase"] = gap_df["Test RMSE"] - gap_df["Train RMSE"]
+        gap_df["RMSE Increase %"] = gap_df["RMSE Increase"] / gap_df["Train RMSE"] * 100
+        gap_df = gap_df.sort_values("RMSE Increase %")
+        st.dataframe(
+            gap_df.style.format({
+                "Train RMSE": "RM {:,.0f}", "Test RMSE": "RM {:,.0f}",
+                "RMSE Increase": "RM {:,.0f}", "RMSE Increase %": "{:+.1f}%",
+            }),
+            width='stretch', hide_index=True,
+        )
 
     st.subheader("Feature Importance")
+    st.caption(
+        "How importance is computed depends on the model, since different models expose different "
+        "signals: **Random Forest / XGBoost** use the model's native tree-based `feature_importances_`; "
+        "**Linear / Ridge Regression** rank features by absolute coefficient magnitude (`|coefficient|`); "
+        "**SVR / KNN** have no native importance, so permutation importance (the drop in Test R² when a "
+        "feature is shuffled) is used instead. Feature importance is model-specific and should **not** be "
+        "compared across models - coefficient magnitude, tree-based importance, and permutation importance "
+        "are different measures on different scales."
+    )
     fi_model = st.selectbox("Model", list(available_models.keys()), key="fi_model")
     info = available_models[fi_model]
 
     if hasattr(info["model"], "feature_importances_"):
         importances = pd.Series(info["model"].feature_importances_, index=X_train.columns) \
             .sort_values(ascending=False).head(15)
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=(9, 7.5))
         colors = sns.light_palette(accent, n_colors=17)[2:]
-        ax.barh(importances.index[::-1], importances.values[::-1], color=colors)
-        ax.set_xlabel("Importance")
+        bars = ax.barh(importances.index[::-1], importances.values[::-1], color=colors)
+        ax.bar_label(bars, labels=[f"{v:.3f}" for v in importances.values[::-1]], padding=4, fontsize=8)
+        ax.set_xlabel("Importance (native to the model)")
         ax.set_title(f"{fi_model}: Top 15 Features (native importance)")
+        ax.tick_params(axis="y", labelsize=9)
+        pad_xlim_for_labels(ax, importances.values)
+        fig.subplots_adjust(left=0.42, right=0.96, top=0.93, bottom=0.08)
         st.pyplot(fig)
+        plt.close(fig)
     elif hasattr(info["model"], "coef_"):
-        coefs = pd.Series(np.abs(np.ravel(info["model"].coef_)), index=X_train.columns) \
-            .sort_values(ascending=False).head(15)
-        fig, ax = plt.subplots(figsize=(8, 6))
-        colors = sns.light_palette(accent, n_colors=17)[2:]
-        ax.barh(coefs.index[::-1], coefs.values[::-1], color=colors)
-        ax.set_xlabel("|Coefficient|")
-        ax.set_title(f"{fi_model}: Top 15 Features (coefficient magnitude)")
+        raw_coefs = pd.Series(np.ravel(info["model"].coef_), index=X_train.columns)
+        top_feats = raw_coefs.abs().sort_values(ascending=False).head(15).index
+        signed = raw_coefs.loc[top_feats][::-1]  # largest |coefficient| plotted at the top
+        fig, ax = plt.subplots(figsize=(9, 7.5))
+        bar_colors = [accent if v >= 0 else "#A6453B" for v in signed.values]
+        bars = ax.barh(signed.index, signed.values, color=bar_colors)
+        ax.axvline(0, color="#4A4A4A", linewidth=0.8)
+        ax.bar_label(bars, labels=[f"{v:+.3f}" for v in signed.values], padding=4, fontsize=8)
+        ax.set_xlabel("Coefficient (signed)")
+        ax.set_title(f"{fi_model}: Top 15 Features by |Coefficient|")
+        ax.tick_params(axis="y", labelsize=9)
+        pad_xlim_for_labels(ax, signed.values)
+        fig.subplots_adjust(left=0.42, right=0.96, top=0.93, bottom=0.08)
         st.pyplot(fig)
+        plt.close(fig)
+        st.caption(
+            "Bars are still ranked by **absolute** coefficient magnitude (largest impact at the top), "
+            "but the signed value is shown so the direction is visible: gold bars push the predicted "
+            "log-price up, red bars push it down. This is a **coefficient**, not a standardised "
+            "importance score, so its scale is only meaningful within this model."
+        )
     else:
         st.caption(f"{fi_model} has no native feature importance (distance/kernel-based model). "
                    "Permutation importance shuffles each feature and measures the resulting drop in Test R2 - "
@@ -647,12 +862,17 @@ def page_performance(available_models, X_train, X_test, X_train_scaled, X_test_s
                                                n_repeats=10, random_state=42, n_jobs=-1)
             importances = pd.Series(perm.importances_mean, index=Xte.columns) \
                 .sort_values(ascending=False).head(15)
-            fig, ax = plt.subplots(figsize=(8, 6))
+            fig, ax = plt.subplots(figsize=(9, 7.5))
             colors = sns.light_palette(accent, n_colors=17)[2:]
-            ax.barh(importances.index[::-1], importances.values[::-1], color=colors)
-            ax.set_xlabel("Mean R2 drop when shuffled")
+            bars = ax.barh(importances.index[::-1], importances.values[::-1], color=colors)
+            ax.bar_label(bars, labels=[f"{v:.4f}" for v in importances.values[::-1]], padding=4, fontsize=8)
+            ax.set_xlabel("Mean Test R2 drop when shuffled")
             ax.set_title(f"{fi_model}: Top 15 Features (permutation importance)")
+            ax.tick_params(axis="y", labelsize=9)
+            pad_xlim_for_labels(ax, importances.values)
+            fig.subplots_adjust(left=0.42, right=0.96, top=0.93, bottom=0.08)
             st.pyplot(fig)
+            plt.close(fig)
 
 
 NAV_PREDICT = "Get My Estimate"
@@ -684,7 +904,7 @@ def main():
     test_metrics = load_test_metrics(available_models, X_test, X_test_scaled, y_test) if available_models else {}
 
     if page == NAV_PREDICT:
-        page_predict(feature_columns, available_models, test_metrics)
+        page_predict(feature_columns, available_models, test_metrics, cleaned_df)
     elif page == NAV_EXPLORE:
         page_explore(cleaned_df, ACCENT)
     else:
